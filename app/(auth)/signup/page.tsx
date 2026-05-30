@@ -55,8 +55,8 @@ export default function SignupPage() {
     <main className="min-h-screen bg-canvas flex flex-col items-center justify-center px-6">
       <a href={MARKETING_URL} className="flex items-center gap-2.5 mb-12 hover:opacity-80 transition-opacity">
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src="/railory_logo_black.png" alt="" width={40} height={40} className="w-10 h-10" />
-        <span className="font-display text-xl font-medium text-near-black">
+        <img src="/railory_logo_black.png" alt="" width={40} height={40} className="w-12 h-12" />
+        <span className="font-display text-2xl font-medium text-near-black">
           Railory
         </span>
       </a>
@@ -64,7 +64,7 @@ export default function SignupPage() {
       <div className="w-full max-w-sm">
         {success ? (
           <div className="text-center">
-            <h1 className="font-display text-card-heading font-medium mb-2 text-near-black">
+            <h1 className="font-display text-feature-heading font-medium mb-2 text-near-black">
               Check your email
             </h1>
             <p className="text-muted-slate text-sm mb-6">
@@ -77,7 +77,7 @@ export default function SignupPage() {
           </div>
         ) : (
         <>
-        <h1 className="font-display text-card-heading font-medium mb-1 text-near-black">
+        <h1 className="font-display text-feature-heading font-medium mb-1 text-near-black">
           Create account
         </h1>
         <p className="text-muted-slate text-sm mb-8">Start discovering your style</p>
