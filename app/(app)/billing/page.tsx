@@ -134,8 +134,8 @@ export default function BillingPage() {
   const features = PLAN_FEATURES[usage.plan] ?? PLAN_FEATURES.free;
 
   const prices: Record<string, Record<string, number>> = {
-    starter: { monthly: 19, yearly: 190 },
-    pro: { monthly: 39, yearly: 390 },
+    starter: { monthly: 9.99, yearly: 95 },
+    pro: { monthly: 24.99, yearly: 239 },
   };
 
   return (
@@ -315,7 +315,7 @@ export default function BillingPage() {
             </div>
 
             {interval === "yearly" && (
-              <p className="text-[11px] text-muted-slate mt-3">Save ~17% with yearly billing</p>
+              <p className="text-[11px] text-muted-slate mt-3">Save ~20% with yearly billing</p>
             )}
           </section>
         )}
