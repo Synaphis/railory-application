@@ -4,8 +4,9 @@ import { createClient } from "@/lib/supabase/server";
 export async function GET(request: Request) {
   const { searchParams, origin } = new URL(request.url);
   const code = searchParams.get("code");
-  // Send through /post-auth so client-side can pick up pending_checkout
-  const next = searchParams.get("next") ?? "/post-auth";
+  const rawNext = searchParams.get("next") ?? "/post-auth";
+  // Only allow same-origin relative paths to prevent open redirects.
+  const next = rawNext.startsWith("/") && !rawNext.startsWith("//") ? rawNext : "/post-auth";
 
   if (code) {
     const supabase = await createClient();

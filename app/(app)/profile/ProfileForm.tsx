@@ -2,6 +2,7 @@
 
 import { useState, useRef } from "react";
 import { callEdgeFunction } from "@/lib/api";
+import { createClient } from "@/lib/supabase/client";
 
 interface ProfileData {
   full_name: string | null;
@@ -75,6 +76,34 @@ export default function ProfileForm({
   const [uploading, setUploading] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
+  const [newEmail, setNewEmail] = useState("");
+  const [changingEmail, setChangingEmail] = useState(false);
+  const [emailMessage, setEmailMessage] = useState<string | null>(null);
+  const [emailError, setEmailError] = useState<string | null>(null);
+
+  async function handleEmailChange() {
+    setChangingEmail(true);
+    setEmailMessage(null);
+    setEmailError(null);
+
+    try {
+      const supabase = createClient();
+      const redirectTo = `${window.location.origin}/auth/callback?next=${encodeURIComponent("/profile")}`;
+      const { error } = await supabase.auth.updateUser(
+        { email: newEmail },
+        { emailRedirectTo: redirectTo }
+      );
+
+      if (error) throw error;
+      setEmailMessage(`Confirmation sent to ${newEmail}. Click the link to complete the change.`);
+      setNewEmail("");
+    } catch (err) {
+      setEmailError(err instanceof Error ? err.message : "Failed to send confirmation");
+    } finally {
+      setChangingEmail(false);
+    }
+  }
+
   async function handleSave() {
     setSaving(true);
     setSaved(false);
@@ -145,6 +174,46 @@ export default function ProfileForm({
         <p className="text-sm text-muted-slate mb-8">
           Your details and try-on avatar settings.
         </p>
+
+        {/* ── Section: Account ── */}
+        <section className="mb-10">
+          <h2 className="text-xs font-mono text-muted-slate uppercase tracking-wider mb-4 pb-2 border-b border-hairline">
+            Account
+          </h2>
+
+          <div>
+            <label className="text-xs font-mono text-muted-slate uppercase tracking-wider block mb-1.5">
+              Email
+            </label>
+            <div className="flex gap-2 items-stretch">
+              <input
+                type="email"
+                value={newEmail}
+                onChange={(e) => setNewEmail(e.target.value)}
+                placeholder={profile?.email ?? "you@example.com"}
+                className="flex-1 min-w-0 bg-canvas border border-hairline px-3 py-2 text-sm text-ink placeholder-muted-slate focus:outline-none focus:border-near-black"
+              />
+              <button
+                onClick={handleEmailChange}
+                disabled={
+                  changingEmail || !newEmail || newEmail === profile?.email
+                }
+                className="px-5 py-2 text-xs font-medium border border-near-black text-ink hover:bg-stone disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
+              >
+                {changingEmail ? "Sending…" : "Change email"}
+              </button>
+            </div>
+            {emailMessage && (
+              <p className="text-xs text-deep-green mt-2">{emailMessage}</p>
+            )}
+            {emailError && (
+              <p className="text-xs text-red-600 mt-2">{emailError}</p>
+            )}
+            <p className="text-[11px] text-muted-slate mt-2">
+              We&rsquo;ll send a confirmation link to your new email. Until you confirm, the change won&rsquo;t take effect.
+            </p>
+          </div>
+        </section>
 
         {/* ── Section: Try-On Avatar ── */}
         <section className="mb-10">
