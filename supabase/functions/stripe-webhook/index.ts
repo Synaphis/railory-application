@@ -84,6 +84,33 @@ Deno.serve(async (req: Request) => {
   }
 });
 
+// ── Period dates helper ─────────────────────────────────────
+//
+// Stripe API 2025-04-30+ moved current_period_start / current_period_end
+// off the top level of Subscription into subscription.items.data[0].
+// This helper reads from the new location and falls back to the old one
+// (so older API versions or unexpected response shapes still work).
+
+function getPeriodDates(sub: Stripe.Subscription | null | undefined): {
+  start: string | null;
+  end: string | null;
+} {
+  if (!sub) return { start: null, end: null };
+  // deno-lint-ignore no-explicit-any
+  const subAny = sub as any;
+  const item = sub.items?.data?.[0];
+  // deno-lint-ignore no-explicit-any
+  const itemAny = item as any;
+  const startUnix =
+    itemAny?.current_period_start ?? subAny?.current_period_start ?? null;
+  const endUnix =
+    itemAny?.current_period_end ?? subAny?.current_period_end ?? null;
+  return {
+    start: startUnix ? new Date(startUnix * 1000).toISOString() : null,
+    end: endUnix ? new Date(endUnix * 1000).toISOString() : null,
+  };
+}
+
 // ── Event handlers ──────────────────────────────────────────
 
 async function handleCheckoutCompleted(
@@ -126,6 +153,8 @@ async function handleCheckoutCompleted(
       ? session.subscription
       : session.subscription?.id;
 
+  const { start, end } = getPeriodDates(stripeSubscription);
+
   const { error } = await db
     .from("subscriptions")
     .update({
@@ -134,12 +163,8 @@ async function handleCheckoutCompleted(
       status: "active",
       stripe_customer_id: customerId,
       stripe_subscription_id: subscriptionId,
-      current_period_start: stripeSubscription?.current_period_start
-        ? new Date(stripeSubscription.current_period_start * 1000).toISOString()
-        : null,
-      current_period_end: stripeSubscription?.current_period_end
-        ? new Date(stripeSubscription.current_period_end * 1000).toISOString()
-        : null,
+      current_period_start: start,
+      current_period_end: end,
       updated_at: new Date().toISOString(),
     })
     .eq("user_id", resolvedUserId);
@@ -168,15 +193,12 @@ async function handleInvoicePaid(
   const stripeSub = await stripe.subscriptions.retrieve(subscriptionId);
   const priceId = stripeSub.items.data[0]?.price?.id;
   const planInfo = priceId ? planFromPriceId(priceId) : null;
+  const { start, end } = getPeriodDates(stripeSub);
 
   const updates: Record<string, unknown> = {
     status: "active",
-    current_period_start: new Date(
-      stripeSub.current_period_start * 1000
-    ).toISOString(),
-    current_period_end: new Date(
-      stripeSub.current_period_end * 1000
-    ).toISOString(),
+    current_period_start: start,
+    current_period_end: end,
     updated_at: new Date().toISOString(),
   };
 
@@ -213,14 +235,11 @@ async function handleSubscriptionUpdated(
     paused: "canceled",
   };
 
+  const { start, end } = getPeriodDates(subscription);
   const updates: Record<string, unknown> = {
     status: statusMap[subscription.status] ?? "active",
-    current_period_start: new Date(
-      subscription.current_period_start * 1000
-    ).toISOString(),
-    current_period_end: new Date(
-      subscription.current_period_end * 1000
-    ).toISOString(),
+    current_period_start: start,
+    current_period_end: end,
     updated_at: new Date().toISOString(),
   };
 
