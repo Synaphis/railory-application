@@ -79,7 +79,7 @@ export default function SavedGrid({ savedRows }: { savedRows: RawSavedRow[] }) {
         <h1 className="font-display text-card-heading font-medium text-near-black mb-6">
           Saved Looks
         </h1>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
           {rows.map((row) => (
             <div key={row.id} className="relative aspect-[9/16]">
               <button

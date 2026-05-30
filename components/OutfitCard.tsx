@@ -143,9 +143,12 @@ export default function OutfitCard({
 
     function handleWheel(e: WheelEvent) {
       if (sheetOpen) return;
-      if (Math.abs(e.deltaY) < 20) return;
+      // Always prevent the page from scrolling while the wheel is inside
+      // this card. Trackpad events come in many tiny deltas — checking a
+      // per-event threshold first would let them slip through.
       e.preventDefault();
       if (wheelLock.current) return;
+      if (Math.abs(e.deltaY) < 5) return;
       wheelLock.current = true;
       if (e.deltaY > 0) {
         setIdx((i) => (i < portraits.length - 1 ? i + 1 : i));
@@ -154,7 +157,7 @@ export default function OutfitCard({
       }
       setTimeout(() => {
         wheelLock.current = false;
-      }, 400);
+      }, 250);
     }
 
     el.addEventListener("wheel", handleWheel, { passive: false });
