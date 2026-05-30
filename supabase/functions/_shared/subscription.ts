@@ -1,0 +1,373 @@
+/**
+ * Subscription & usage helpers for edge functions.
+ *
+ * All functions take a Supabase service-role client so they
+ * can read/write without RLS restrictions.
+ */
+
+import type { SupabaseClient } from "npm:@supabase/supabase-js@2.49.4";
+import { getLimits, type PlanLimits } from "./plans.ts";
+import { CORS_HEADERS } from "./auth.ts";
+
+// ── Types ──────────────────────────────────────────────────
+
+export interface Subscription {
+  plan: string;
+  status: string;
+  billing_interval: string | null;
+  stripe_customer_id: string | null;
+  current_period_start: string | null;
+  current_period_end: string | null;
+}
+
+export interface UsageRow {
+  generations: number;
+  try_ons: number;
+  saved_looks: number;
+}
+
+// ── Period helper ──────────────────────────────────────────
+
+/** Current billing period key, e.g. '2026-05-01'. */
+export function currentPeriod(): string {
+  const now = new Date();
+  const y = now.getUTCFullYear();
+  const m = String(now.getUTCMonth() + 1).padStart(2, "0");
+  return `${y}-${m}-01`;
+}
+
+// ── Queries ────────────────────────────────────────────────
+
+/** Get the user's subscription row. Returns free defaults if missing or expired. */
+export async function getUserSubscription(
+  db: SupabaseClient,
+  userId: string
+): Promise<Subscription> {
+  const { data } = await db
+    .from("subscriptions")
+    .select(
+      "plan, status, billing_interval, stripe_customer_id, current_period_start, current_period_end"
+    )
+    .eq("user_id", userId)
+    .single();
+
+  const FREE_SUB: Subscription = {
+    plan: "free",
+    status: "active",
+    billing_interval: null,
+    stripe_customer_id: null,
+    current_period_start: null,
+    current_period_end: null,
+  };
+
+  if (!data) return FREE_SUB;
+
+  const sub = data as Subscription;
+
+  // If subscription is not active (past_due, canceled, etc.), treat as free
+  if (sub.status !== "active" && sub.status !== "trialing") {
+    return { ...sub, plan: "free" };
+  }
+
+  // If subscription period has expired (webhook may be delayed), treat as free
+  if (sub.current_period_end && sub.plan !== "free") {
+    const endDate = new Date(sub.current_period_end);
+    // Allow 3-day grace period for webhook delivery delays
+    const grace = new Date(endDate.getTime() + 3 * 24 * 60 * 60 * 1000);
+    if (new Date() > grace) {
+      return { ...sub, plan: "free" };
+    }
+  }
+
+  return sub;
+}
+
+/** Get usage counters for the current period. Returns zeros if no row. */
+export async function getPeriodUsage(
+  db: SupabaseClient,
+  userId: string
+): Promise<UsageRow> {
+  const period = currentPeriod();
+
+  const { data } = await db
+    .from("usage")
+    .select("generations, try_ons, saved_looks")
+    .eq("user_id", userId)
+    .eq("period", period)
+    .single();
+
+  return {
+    generations: data?.generations ?? 0,
+    try_ons: data?.try_ons ?? 0,
+    saved_looks: data?.saved_looks ?? 0,
+  };
+}
+
+/** Count total saved outfits for the user (not period-scoped). */
+export async function getSavedCount(
+  db: SupabaseClient,
+  userId: string
+): Promise<number> {
+  const { count } = await db
+    .from("saved_outfits")
+    .select("id", { count: "exact", head: true })
+    .eq("user_id", userId);
+
+  return count ?? 0;
+}
+
+// ── Usage increment ────────────────────────────────────────
+
+type UsageField = "generations" | "try_ons" | "saved_looks";
+
+/** Increment a usage counter for the current period. Upserts the row. */
+export async function incrementUsage(
+  db: SupabaseClient,
+  userId: string,
+  field: UsageField,
+  amount = 1
+): Promise<void> {
+  const period = currentPeriod();
+
+  // Try to upsert: insert or increment
+  const { error } = await db.rpc("increment_usage", {
+    p_user_id: userId,
+    p_period: period,
+    p_field: field,
+    p_amount: amount,
+  });
+
+  if (error) {
+    // Fallback: try raw upsert
+    console.warn("[usage] RPC failed, using fallback upsert:", error.message);
+
+    const { data: existing } = await db
+      .from("usage")
+      .select("id, generations, try_ons, saved_looks")
+      .eq("user_id", userId)
+      .eq("period", period)
+      .single();
+
+    if (existing) {
+      await db
+        .from("usage")
+        .update({
+          [field]: (existing[field] ?? 0) + amount,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", existing.id);
+    } else {
+      await db.from("usage").insert({
+        user_id: userId,
+        period,
+        [field]: amount,
+      });
+    }
+  }
+}
+
+// ── Limit checks ───────────────────────────────────────────
+
+export interface LimitCheckResult {
+  allowed: boolean;
+  current: number;
+  limit: number;
+  plan: string;
+}
+
+/**
+ * Atomically check limit AND pre-increment usage.
+ * This prevents the race condition where concurrent requests
+ * all pass the check before any increment happens.
+ *
+ * If over limit, does NOT increment and returns allowed: false.
+ * If the expensive operation fails later, call rollbackUsage() to decrement.
+ */
+export async function checkAndIncrementGeneration(
+  db: SupabaseClient,
+  userId: string
+): Promise<LimitCheckResult> {
+  const sub = await getUserSubscription(db, userId);
+  const limits = getLimits(sub.plan);
+
+  // Pre-increment
+  await incrementUsage(db, userId, "generations");
+  const usage = await getPeriodUsage(db, userId);
+
+  if (usage.generations > limits.generations) {
+    // Over limit — roll back and reject
+    await incrementUsage(db, userId, "generations", -1);
+    return {
+      allowed: false,
+      current: usage.generations - 1,
+      limit: limits.generations,
+      plan: sub.plan,
+    };
+  }
+
+  return {
+    allowed: true,
+    current: usage.generations,
+    limit: limits.generations,
+    plan: sub.plan,
+  };
+}
+
+/** Legacy non-atomic check (for read-only limit display). */
+export async function checkGenerationLimit(
+  db: SupabaseClient,
+  userId: string
+): Promise<LimitCheckResult> {
+  const sub = await getUserSubscription(db, userId);
+  const usage = await getPeriodUsage(db, userId);
+  const limits = getLimits(sub.plan);
+
+  return {
+    allowed: usage.generations < limits.generations,
+    current: usage.generations,
+    limit: limits.generations,
+    plan: sub.plan,
+  };
+}
+
+/** Atomically check and pre-increment try-on usage. */
+export async function checkAndIncrementTryOn(
+  db: SupabaseClient,
+  userId: string
+): Promise<LimitCheckResult> {
+  const sub = await getUserSubscription(db, userId);
+  const limits = getLimits(sub.plan);
+
+  if (limits.try_ons === 0) {
+    return { allowed: false, current: 0, limit: 0, plan: sub.plan };
+  }
+
+  await incrementUsage(db, userId, "try_ons");
+  const usage = await getPeriodUsage(db, userId);
+
+  if (usage.try_ons > limits.try_ons) {
+    await incrementUsage(db, userId, "try_ons", -1);
+    return {
+      allowed: false,
+      current: usage.try_ons - 1,
+      limit: limits.try_ons,
+      plan: sub.plan,
+    };
+  }
+
+  return {
+    allowed: true,
+    current: usage.try_ons,
+    limit: limits.try_ons,
+    plan: sub.plan,
+  };
+}
+
+/** Legacy non-atomic check. */
+export async function checkTryOnLimit(
+  db: SupabaseClient,
+  userId: string
+): Promise<LimitCheckResult> {
+  const sub = await getUserSubscription(db, userId);
+  const usage = await getPeriodUsage(db, userId);
+  const limits = getLimits(sub.plan);
+
+  return {
+    allowed: limits.try_ons > 0 && usage.try_ons < limits.try_ons,
+    current: usage.try_ons,
+    limit: limits.try_ons,
+    plan: sub.plan,
+  };
+}
+
+/** Roll back a pre-incremented usage counter (call when the expensive op fails). */
+export async function rollbackUsage(
+  db: SupabaseClient,
+  userId: string,
+  field: UsageField
+): Promise<void> {
+  await incrementUsage(db, userId, field, -1);
+}
+
+/** Check if the user can save another outfit. */
+export async function checkSavedLimit(
+  db: SupabaseClient,
+  userId: string
+): Promise<LimitCheckResult> {
+  const sub = await getUserSubscription(db, userId);
+  const savedCount = await getSavedCount(db, userId);
+  const limits = getLimits(sub.plan);
+
+  return {
+    allowed: savedCount < limits.saved_looks,
+    current: savedCount,
+    limit: limits.saved_looks,
+    plan: sub.plan,
+  };
+}
+
+/** Check if user's plan allows custom avatar upload. */
+export async function checkCustomAvatarAllowed(
+  db: SupabaseClient,
+  userId: string
+): Promise<{ allowed: boolean; plan: string }> {
+  const sub = await getUserSubscription(db, userId);
+  const limits = getLimits(sub.plan);
+
+  return { allowed: limits.custom_avatar, plan: sub.plan };
+}
+
+/** Check the allowed try-on angles for the user's plan. */
+export async function getAllowedAngles(
+  db: SupabaseClient,
+  userId: string
+): Promise<{ angles: number; plan: string }> {
+  const sub = await getUserSubscription(db, userId);
+  const limits = getLimits(sub.plan);
+
+  return { angles: limits.try_on_angles, plan: sub.plan };
+}
+
+// ── Limit error response ───────────────────────────────────
+
+/** Build a 403 limit-exceeded response with upgrade hint. */
+export function limitResponse(
+  resource: string,
+  check: LimitCheckResult
+): Response {
+  return new Response(
+    JSON.stringify({
+      error: `${resource} limit reached`,
+      code: "LIMIT_EXCEEDED",
+      resource,
+      current: check.current,
+      limit: check.limit,
+      plan: check.plan,
+      upgrade_url: "/billing",
+    }),
+    {
+      status: 403,
+      headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
+    }
+  );
+}
+
+/** Build a 403 feature-gated response. */
+export function featureGatedResponse(
+  feature: string,
+  plan: string
+): Response {
+  return new Response(
+    JSON.stringify({
+      error: `${feature} is not available on the ${plan} plan`,
+      code: "FEATURE_GATED",
+      feature,
+      plan,
+      upgrade_url: "/billing",
+    }),
+    {
+      status: 403,
+      headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
+    }
+  );
+}

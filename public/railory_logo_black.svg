@@ -1,0 +1,21 @@
+<svg width="680" height="680" viewBox="0 0 680 680" xmlns="http://www.w3.org/2000/svg">
+  <!-- Transparent background -->
+
+  <g transform="translate(340,340)" stroke="#111111" stroke-linecap="round" stroke-linejoin="round" fill="none">
+
+    <!-- HORIZONTAL RAIL -->
+    <line x1="-220" y1="-60" x2="220" y2="-60" stroke-width="18"/>
+
+    <!-- HANGER HOOK - small loop at top connecting to rail -->
+    <path d="M 0,-60 Q 0,-30 0,-20" stroke-width="14"/>
+
+    <!-- HANGER TRIANGLE BODY -->
+    <!-- Two angled arms spreading out from center top -->
+    <path d="M 0,-20 Q -10,40 -130,90" stroke-width="14"/>
+    <path d="M 0,-20 Q 10,40 130,90" stroke-width="14"/>
+
+    <!-- HANGER BOTTOM BAR -->
+    <line x1="-130" y1="90" x2="130" y2="90" stroke-width="14"/>
+
+  </g>
+</svg>

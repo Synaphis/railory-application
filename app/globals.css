@@ -1,0 +1,151 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ────────────────────────────────────────────
+   Design Tokens (Cohere-inspired)
+   ──────────────────────────────────────────── */
+:root {
+  /* Brand & Accent */
+  --cohere-black: #000000;
+  --near-black: #17171c;
+  --deep-green: #003c33;
+  --dark-navy: #071829;
+  --action-blue: #1863dc;
+  --coral: #ff7759;
+  --soft-coral: #ffad9b;
+
+  /* Surface & Background */
+  --canvas: #ffffff;
+  --stone: #eeece7;
+  --pale-green: #edfce9;
+  --pale-blue: #f1f5ff;
+  --card-border: #f2f2f2;
+
+  /* Text & Rules */
+  --ink: #212121;
+  --muted-slate: #93939f;
+  --slate: #75758a;
+  --hairline: #d9d9dd;
+  --border-light: #e5e7eb;
+
+  /* Semantic */
+  --focus-blue: #4c6ee6;
+  --form-focus-violet: #9b60aa;
+  --error-red: #b30000;
+}
+
+/* ────────────────────────────────────────────
+   Base Reset
+   ──────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  padding: 0;
+  margin: 0;
+}
+
+html,
+body {
+  max-width: 100vw;
+  overflow-x: hidden;
+  background-color: var(--canvas);
+  color: var(--ink);
+  font-family: 'Inter', Arial, ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* ────────────────────────────────────────────
+   Transitions (scoped, not global *)
+   ──────────────────────────────────────────── */
+a,
+button,
+input,
+textarea,
+select,
+[role="button"] {
+  transition-property: color, background-color, border-color, opacity, transform, box-shadow;
+  transition-duration: 150ms;
+  transition-timing-function: ease;
+}
+
+/* ────────────────────────────────────────────
+   Skeleton shimmer
+   ──────────────────────────────────────────── */
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    #f2f2f2 25%,
+    #e8e8e8 50%,
+    #f2f2f2 75%
+  );
+  background-size: 1000px 100%;
+  animation: shimmer 2s linear infinite;
+}
+
+/* ────────────────────────────────────────────
+   Custom scrollbar
+   ──────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: var(--card-border);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--hairline);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted-slate);
+}
+
+/* ────────────────────────────────────────────
+   Selection
+   ──────────────────────────────────────────── */
+::selection {
+  background: rgba(255, 119, 89, 0.15);
+  color: var(--ink);
+}
+
+/* ────────────────────────────────────────────
+   Focus ring
+   ──────────────────────────────────────────── */
+:focus-visible {
+  outline: 2px solid var(--focus-blue);
+  outline-offset: 2px;
+}
+
+/* ────────────────────────────────────────────
+   Form inputs – Cohere style
+   ──────────────────────────────────────────── */
+input[type="text"]:focus,
+input[type="email"]:focus,
+input[type="password"]:focus,
+input[type="number"]:focus,
+textarea:focus {
+  border-color: var(--near-black);
+  box-shadow: 0 0 0 1px var(--near-black);
+  outline: none;
+}
+
+/* ────────────────────────────────────────────
+   Utility: hide scrollbar
+   ──────────────────────────────────────────── */
+.hide-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}
