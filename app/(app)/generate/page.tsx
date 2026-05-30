@@ -64,6 +64,22 @@ function GeneratePage() {
   const [showPrompt, setShowPrompt] = useState(true);
   const [showSessions, setShowSessions] = useState(false);
 
+  // Track the fixed bottom bar's height so the cards area can pad itself
+  // exactly right — height changes when the sessions drawer toggles or
+  // the prompt section expands/collapses.
+  const bottomBarRef = useRef<HTMLDivElement>(null);
+  const [bottomBarHeight, setBottomBarHeight] = useState(0);
+
+  useEffect(() => {
+    const el = bottomBarRef.current;
+    if (!el) return;
+    const update = () => setBottomBarHeight(el.offsetHeight);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
   const loadSessions = useCallback(async () => {
     const { data } = await supabase
       .from("outfit_sessions")
@@ -249,7 +265,10 @@ function GeneratePage() {
   const hasResults = outfits.length > 0 || loading;
 
   return (
-    <div className="min-h-full bg-canvas flex flex-col">
+    <div
+      className="min-h-full bg-canvas flex flex-col"
+      style={{ paddingBottom: bottomBarHeight }}
+    >
       {/* ── Limit error ── */}
       {limitError && (
         <div className="mx-6 mt-4">
@@ -277,8 +296,11 @@ function GeneratePage() {
         />
       </div>
 
-      {/* ── Bottom controls (sticky) ── */}
-      <div className="sticky bottom-0 bg-canvas z-10 border-t border-hairline">
+      {/* ── Bottom controls (fixed to viewport) ── */}
+      <div
+        ref={bottomBarRef}
+        className="fixed bottom-0 left-0 right-0 z-20 bg-canvas border-t border-hairline"
+      >
         {/* Refine bar */}
         {hasResults && !loading && outfits.length > 0 && (
           <div className="border-b border-hairline px-6 py-3">
