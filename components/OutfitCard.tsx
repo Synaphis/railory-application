@@ -126,12 +126,40 @@ export default function OutfitCard({
   const [saving, setSaving] = useState(false);
 
   const wheelLock = useRef(false);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   // Clamp
   useEffect(() => {
     if (portraits.length > 0 && idx >= portraits.length)
       setIdx(portraits.length - 1);
   }, [portraits.length, idx]);
+
+  // Native wheel listener so preventDefault actually works (React's
+  // synthetic onWheel is passive by default in React 17+). Without
+  // this the page scrolls behind the card while the image advances.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    function handleWheel(e: WheelEvent) {
+      if (sheetOpen) return;
+      if (Math.abs(e.deltaY) < 20) return;
+      e.preventDefault();
+      if (wheelLock.current) return;
+      wheelLock.current = true;
+      if (e.deltaY > 0) {
+        setIdx((i) => (i < portraits.length - 1 ? i + 1 : i));
+      } else {
+        setIdx((i) => (i > 0 ? i - 1 : i));
+      }
+      setTimeout(() => {
+        wheelLock.current = false;
+      }, 400);
+    }
+
+    el.addEventListener("wheel", handleWheel, { passive: false });
+    return () => el.removeEventListener("wheel", handleWheel);
+  }, [sheetOpen, portraits.length]);
 
   const cur = portraits[idx] ?? null;
   const hasPreview = !!outfit.preview_image && outfit.preview_image !== "";
@@ -152,16 +180,6 @@ export default function OutfitCard({
     const x = e.clientX - rect.left;
     if (x < rect.width / 3) goPrev();
     else goNext();
-  }
-
-  function onWheel(e: React.WheelEvent) {
-    if (sheetOpen || wheelLock.current) return;
-    if (Math.abs(e.deltaY) < 20) return;
-    wheelLock.current = true;
-    e.deltaY > 0 ? goNext() : goPrev();
-    setTimeout(() => {
-      wheelLock.current = false;
-    }, 400);
   }
 
   // Touch
@@ -195,10 +213,10 @@ export default function OutfitCard({
   return (
     <>
       <div
+        ref={containerRef}
         className="relative w-full h-full bg-near-black overflow-hidden select-none cursor-pointer"
         onTouchStart={onTouchStart}
         onTouchEnd={onTouchEnd}
-        onWheel={onWheel}
         onClick={onImageClick}
       >
         {/* ── Full-bleed image ── */}
@@ -358,6 +376,18 @@ function DetailsSheet({
   currency: string;
   onClose: () => void;
 }) {
+  const [lightboxImg, setLightboxImg] = useState<string | null>(null);
+
+  // Close lightbox on Escape
+  useEffect(() => {
+    if (!lightboxImg) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setLightboxImg(null);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [lightboxImg]);
+
   return (
     <div
       className="absolute inset-0 z-20 bg-canvas animate-slide-up overflow-y-auto"
@@ -437,13 +467,16 @@ function DetailsSheet({
               </a>
             )}
 
-            {/* Thumbnail strip — ALL images */}
+            {/* Thumbnail strip — ALL images, click to view full */}
             {item.product.images && item.product.images.length > 0 && (
               <div className="flex gap-2 overflow-x-auto pb-1 hide-scrollbar">
                 {item.product.images.map((src, i) => (
-                  <div
+                  <button
                     key={i}
-                    className="relative w-16 h-20 flex-shrink-0 bg-stone overflow-hidden border border-hairline"
+                    type="button"
+                    onClick={() => setLightboxImg(src)}
+                    className="relative w-16 h-20 flex-shrink-0 bg-stone overflow-hidden border border-hairline hover:border-ink transition-colors"
+                    title="View full image"
                   >
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
@@ -451,13 +484,39 @@ function DetailsSheet({
                       alt={`${item.product.name} ${i + 1}`}
                       className="w-full h-full object-cover"
                     />
-                  </div>
+                  </button>
                 ))}
               </div>
             )}
           </div>
         ))}
       </div>
+
+      {/* ── Lightbox ── */}
+      {lightboxImg && (
+        <div
+          className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center p-6 animate-fade-in"
+          onClick={() => setLightboxImg(null)}
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={lightboxImg}
+            alt=""
+            className="max-w-full max-h-full object-contain"
+            onClick={(e) => e.stopPropagation()}
+          />
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setLightboxImg(null);
+            }}
+            className="absolute top-5 right-5 w-10 h-10 flex items-center justify-center bg-black/40 backdrop-blur-sm border border-white/15 text-white hover:bg-black/60 transition-colors text-xl"
+            title="Close"
+          >
+            &times;
+          </button>
+        </div>
+      )}
     </div>
   );
 }
