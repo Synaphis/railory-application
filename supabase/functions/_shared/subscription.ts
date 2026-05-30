@@ -176,12 +176,13 @@ export interface LimitCheckResult {
 }
 
 /**
- * Atomically check limit AND pre-increment usage.
- * This prevents the race condition where concurrent requests
- * all pass the check before any increment happens.
+ * Atomic check-and-increment via the check_and_increment_usage SQL
+ * function. Holds a row lock for the duration of the check + write,
+ * so concurrent callers can never both pass the limit boundary.
  *
- * If over limit, does NOT increment and returns allowed: false.
- * If the expensive operation fails later, call rollbackUsage() to decrement.
+ * If over limit, the counter is NOT incremented and allowed=false.
+ * If the expensive operation fails later, call rollbackUsage() to
+ * decrement.
  */
 export async function checkAndIncrementGeneration(
   db: SupabaseClient,
@@ -189,28 +190,32 @@ export async function checkAndIncrementGeneration(
 ): Promise<LimitCheckResult> {
   const sub = await getUserSubscription(db, userId);
   const limits = getLimits(sub.plan);
+  const period = currentPeriod();
 
-  // Pre-increment
-  await incrementUsage(db, userId, "generations");
-  const usage = await getPeriodUsage(db, userId);
+  const { data, error } = await db.rpc("check_and_increment_usage", {
+    p_user_id: userId,
+    p_period: period,
+    p_field: "generations",
+    p_limit: limits.generations,
+  });
 
-  if (usage.generations > limits.generations) {
-    // Over limit — roll back and reject
-    await incrementUsage(db, userId, "generations", -1);
+  if (error) {
+    console.error("[check_and_increment_usage:generations]", error);
+    // Fail closed — never allow generation if the limit RPC errors,
+    // even on a transient failure. Billing integrity > availability.
     return {
       allowed: false,
-      current: usage.generations - 1,
+      current: 0,
       limit: limits.generations,
       plan: sub.plan,
     };
   }
 
-  return {
-    allowed: true,
-    current: usage.generations,
-    limit: limits.generations,
-    plan: sub.plan,
-  };
+  const row = Array.isArray(data) ? data[0] : data;
+  const allowed = !!row?.allowed;
+  const current = row?.new_count ?? 0;
+
+  return { allowed, current, limit: limits.generations, plan: sub.plan };
 }
 
 /** Legacy non-atomic check (for read-only limit display). */
@@ -230,7 +235,7 @@ export async function checkGenerationLimit(
   };
 }
 
-/** Atomically check and pre-increment try-on usage. */
+/** Atomic check-and-increment try-on usage (same pattern as generations). */
 export async function checkAndIncrementTryOn(
   db: SupabaseClient,
   userId: string
@@ -242,25 +247,29 @@ export async function checkAndIncrementTryOn(
     return { allowed: false, current: 0, limit: 0, plan: sub.plan };
   }
 
-  await incrementUsage(db, userId, "try_ons");
-  const usage = await getPeriodUsage(db, userId);
+  const period = currentPeriod();
+  const { data, error } = await db.rpc("check_and_increment_usage", {
+    p_user_id: userId,
+    p_period: period,
+    p_field: "try_ons",
+    p_limit: limits.try_ons,
+  });
 
-  if (usage.try_ons > limits.try_ons) {
-    await incrementUsage(db, userId, "try_ons", -1);
+  if (error) {
+    console.error("[check_and_increment_usage:try_ons]", error);
     return {
       allowed: false,
-      current: usage.try_ons - 1,
+      current: 0,
       limit: limits.try_ons,
       plan: sub.plan,
     };
   }
 
-  return {
-    allowed: true,
-    current: usage.try_ons,
-    limit: limits.try_ons,
-    plan: sub.plan,
-  };
+  const row = Array.isArray(data) ? data[0] : data;
+  const allowed = !!row?.allowed;
+  const current = row?.new_count ?? 0;
+
+  return { allowed, current, limit: limits.try_ons, plan: sub.plan };
 }
 
 /** Legacy non-atomic check. */
