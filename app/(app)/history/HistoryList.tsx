@@ -149,19 +149,19 @@ export default function HistoryList({ sessions }: { sessions: SessionWithCount[]
 
             {/* Outfit cards */}
             {loading === expanded ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
                 {[1, 2].map((i) => (
-                  <div key={i} className="skeleton aspect-[3/5]" />
+                  <div key={i} className="skeleton aspect-[9/16]" />
                 ))}
               </div>
             ) : (sessionOutfits[expanded!] ?? []).length === 0 ? (
               <p className="text-muted-slate text-sm">No outfits found.</p>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
                 {(sessionOutfits[expanded!] ?? []).map((outfit) => (
                   <div
                     key={outfit.id}
-                    className={`aspect-[3/5] ${
+                    className={`aspect-[9/16] ${
                       highlightOutfitId === outfit.id
                         ? "ring-2 ring-coral ring-offset-2 ring-offset-canvas"
                         : ""

@@ -259,7 +259,7 @@ export default function TryOnGallery({
                     outfitId: item.outfitId,
                   })
                 }
-                className="group relative aspect-[3/5] bg-stone overflow-hidden border border-hairline hover:border-ink transition-colors"
+                className="group relative aspect-[9/16] bg-stone overflow-hidden border border-hairline hover:border-ink transition-colors"
               >
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
