@@ -127,6 +127,7 @@ export default function OutfitCard({
 
   const wheelLock = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const idxRef = useRef(idx);
 
   // Clamp
   useEffect(() => {
@@ -134,26 +135,39 @@ export default function OutfitCard({
       setIdx(portraits.length - 1);
   }, [portraits.length, idx]);
 
+  // Keep idx readable inside the wheel handler without re-attaching.
+  useEffect(() => {
+    idxRef.current = idx;
+  }, [idx]);
+
   // Native wheel listener so preventDefault actually works (React's
-  // synthetic onWheel is passive by default in React 17+). Without
-  // this the page scrolls behind the card while the image advances.
+  // synthetic onWheel is passive by default in React 17+).
+  //
+  // Boundary passthrough: when the carousel is at its first image and
+  // the user wheels up, or at its last image and wheels down, we let
+  // the event continue so the page can scroll. Otherwise the card
+  // would trap all scroll while many cards fill the viewport.
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
 
     function handleWheel(e: WheelEvent) {
       if (sheetOpen) return;
-      // Always prevent the page from scrolling while the wheel is inside
-      // this card. Trackpad events come in many tiny deltas — checking a
-      // per-event threshold first would let them slip through.
+      const i = idxRef.current;
+      const last = portraits.length - 1;
+      const goingDown = e.deltaY > 0;
+      const goingUp = e.deltaY < 0;
+      // Pass through to page scroll at the boundaries
+      if ((goingDown && i >= last) || (goingUp && i <= 0)) return;
+
       e.preventDefault();
       if (wheelLock.current) return;
       if (Math.abs(e.deltaY) < 5) return;
       wheelLock.current = true;
-      if (e.deltaY > 0) {
-        setIdx((i) => (i < portraits.length - 1 ? i + 1 : i));
+      if (goingDown) {
+        setIdx((j) => (j < last ? j + 1 : j));
       } else {
-        setIdx((i) => (i > 0 ? i - 1 : i));
+        setIdx((j) => (j > 0 ? j - 1 : j));
       }
       setTimeout(() => {
         wheelLock.current = false;
