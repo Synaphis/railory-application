@@ -16,7 +16,17 @@
 
 # misc
 .DS_Store
+**/.DS_Store
 *.pem
+
+# editor / AI tooling
+.claude/
+.gemini/
+.idea/
+.vscode/
+
+# supabase CLI cache
+supabase/.temp/
 
 # debug
 npm-debug.log*
