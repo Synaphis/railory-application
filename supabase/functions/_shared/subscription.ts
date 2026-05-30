@@ -29,28 +29,74 @@ export interface UsageRow {
 // ── Period helper ──────────────────────────────────────────
 
 /**
+ * Add one calendar month to `date`, anchored to `anchorDay`. If the
+ * target month has fewer days than `anchorDay` (e.g. Feb after Jan 31),
+ * clamps to the last day of the target month.
+ */
+function addOneMonth(date: Date, anchorDay: number): Date {
+  const month = date.getUTCMonth();
+  const targetYear =
+    month === 11 ? date.getUTCFullYear() + 1 : date.getUTCFullYear();
+  const targetMonth = (month + 1) % 12;
+  const lastDay = new Date(
+    Date.UTC(targetYear, targetMonth + 1, 0)
+  ).getUTCDate();
+  const day = Math.min(anchorDay, lastDay);
+  return new Date(Date.UTC(targetYear, targetMonth, day, 0, 0, 0, 0));
+}
+
+/**
+ * For a subscription starting on `start`, return the most recent
+ * monthly anniversary at or before `now`. Walks forward one month
+ * at a time from `start` (max ~12 iterations for a yearly sub).
+ */
+function monthlyAnchor(start: Date, now: Date): Date {
+  const anchorDay = start.getUTCDate();
+  let current = new Date(
+    Date.UTC(
+      start.getUTCFullYear(),
+      start.getUTCMonth(),
+      anchorDay,
+      0,
+      0,
+      0,
+      0
+    )
+  );
+  // Safety bound — should never loop more than 12 times in practice.
+  for (let i = 0; i < 24; i++) {
+    const next = addOneMonth(current, anchorDay);
+    if (next > now) return current;
+    current = next;
+  }
+  return current;
+}
+
+/**
  * Current usage period key.
  *
- * Paid users get a billing-anniversary cycle: their period key is the
- * ISO date of `subscription.current_period_start`. The Stripe webhook
- * rotates this every renewal, so the counter naturally resets when
- * their cycle resets.
+ * Paid users get a billing-anniversary cycle: the period key is the
+ * ISO date of the most recent monthly anniversary of their
+ * `current_period_start`. For monthly subs, Stripe updates
+ * current_period_start each cycle so the anchor coincides with it.
+ * For yearly subs, the anchor walks forward monthly within the
+ * yearly billing cycle — so "200 generations / month" really means
+ * 200 each month for 12 months, not 2,400 spread across the year.
  *
- * Free users (and any caller without a subscription handy) fall back
- * to calendar-month boundaries (first-of-month UTC) — there's no
- * billing cycle to anchor to.
+ * Free users fall back to calendar-month boundaries (first-of-month
+ * UTC) — there's no billing cycle to anchor to.
  */
 export function currentPeriod(
   sub?: Pick<Subscription, "plan" | "current_period_start"> | null
 ): string {
-  if (sub && sub.plan !== "free" && sub.current_period_start) {
-    // ISO timestamp like '2026-05-24T23:12:40.000+00:00' → '2026-05-24'
-    return sub.current_period_start.slice(0, 10);
+  if (!sub || sub.plan === "free" || !sub.current_period_start) {
+    const now = new Date();
+    const y = now.getUTCFullYear();
+    const m = String(now.getUTCMonth() + 1).padStart(2, "0");
+    return `${y}-${m}-01`;
   }
-  const now = new Date();
-  const y = now.getUTCFullYear();
-  const m = String(now.getUTCMonth() + 1).padStart(2, "0");
-  return `${y}-${m}-01`;
+  const anchor = monthlyAnchor(new Date(sub.current_period_start), new Date());
+  return anchor.toISOString().slice(0, 10);
 }
 
 // ── Queries ────────────────────────────────────────────────
