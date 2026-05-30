@@ -236,7 +236,7 @@ export default function TryOnGallery({
 
   return (
     <div>
-      <div className="px-8 py-6">
+      <div className="px-8 pt-6 pb-16">
         <h1 className="font-display text-card-heading font-medium text-near-black mb-1">
           Try-Ons
         </h1>
@@ -259,7 +259,7 @@ export default function TryOnGallery({
                     outfitId: item.outfitId,
                   })
                 }
-                className="group relative aspect-[3/4] bg-stone overflow-hidden border border-hairline hover:border-ink transition-colors"
+                className="group relative aspect-[3/5] bg-stone overflow-hidden border border-hairline hover:border-ink transition-colors"
               >
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
