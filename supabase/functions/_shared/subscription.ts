@@ -28,8 +28,25 @@ export interface UsageRow {
 
 // ── Period helper ──────────────────────────────────────────
 
-/** Current billing period key, e.g. '2026-05-01'. */
-export function currentPeriod(): string {
+/**
+ * Current usage period key.
+ *
+ * Paid users get a billing-anniversary cycle: their period key is the
+ * ISO date of `subscription.current_period_start`. The Stripe webhook
+ * rotates this every renewal, so the counter naturally resets when
+ * their cycle resets.
+ *
+ * Free users (and any caller without a subscription handy) fall back
+ * to calendar-month boundaries (first-of-month UTC) — there's no
+ * billing cycle to anchor to.
+ */
+export function currentPeriod(
+  sub?: Pick<Subscription, "plan" | "current_period_start"> | null
+): string {
+  if (sub && sub.plan !== "free" && sub.current_period_start) {
+    // ISO timestamp like '2026-05-24T23:12:40.000+00:00' → '2026-05-24'
+    return sub.current_period_start.slice(0, 10);
+  }
   const now = new Date();
   const y = now.getUTCFullYear();
   const m = String(now.getUTCMonth() + 1).padStart(2, "0");
@@ -82,12 +99,15 @@ export async function getUserSubscription(
   return sub;
 }
 
-/** Get usage counters for the current period. Returns zeros if no row. */
+/** Get usage counters for the current period. Returns zeros if no row.
+ *  Pass `sub` if you already have it (avoids an extra query). */
 export async function getPeriodUsage(
   db: SupabaseClient,
-  userId: string
+  userId: string,
+  sub?: Subscription
 ): Promise<UsageRow> {
-  const period = currentPeriod();
+  const subscription = sub ?? (await getUserSubscription(db, userId));
+  const period = currentPeriod(subscription);
 
   const { data } = await db
     .from("usage")
@@ -120,14 +140,17 @@ export async function getSavedCount(
 
 type UsageField = "generations" | "try_ons" | "saved_looks";
 
-/** Increment a usage counter for the current period. Upserts the row. */
+/** Increment a usage counter for the current period. Upserts the row.
+ *  Pass `sub` if available so the period key uses the billing cycle. */
 export async function incrementUsage(
   db: SupabaseClient,
   userId: string,
   field: UsageField,
-  amount = 1
+  amount = 1,
+  sub?: Subscription
 ): Promise<void> {
-  const period = currentPeriod();
+  const subscription = sub ?? (await getUserSubscription(db, userId));
+  const period = currentPeriod(subscription);
 
   // Try to upsert: insert or increment
   const { error } = await db.rpc("increment_usage", {
@@ -190,7 +213,7 @@ export async function checkAndIncrementGeneration(
 ): Promise<LimitCheckResult> {
   const sub = await getUserSubscription(db, userId);
   const limits = getLimits(sub.plan);
-  const period = currentPeriod();
+  const period = currentPeriod(sub);
 
   const { data, error } = await db.rpc("check_and_increment_usage", {
     p_user_id: userId,
@@ -224,7 +247,7 @@ export async function checkGenerationLimit(
   userId: string
 ): Promise<LimitCheckResult> {
   const sub = await getUserSubscription(db, userId);
-  const usage = await getPeriodUsage(db, userId);
+  const usage = await getPeriodUsage(db, userId, sub);
   const limits = getLimits(sub.plan);
 
   return {
@@ -247,7 +270,7 @@ export async function checkAndIncrementTryOn(
     return { allowed: false, current: 0, limit: 0, plan: sub.plan };
   }
 
-  const period = currentPeriod();
+  const period = currentPeriod(sub);
   const { data, error } = await db.rpc("check_and_increment_usage", {
     p_user_id: userId,
     p_period: period,
@@ -278,7 +301,7 @@ export async function checkTryOnLimit(
   userId: string
 ): Promise<LimitCheckResult> {
   const sub = await getUserSubscription(db, userId);
-  const usage = await getPeriodUsage(db, userId);
+  const usage = await getPeriodUsage(db, userId, sub);
   const limits = getLimits(sub.plan);
 
   return {

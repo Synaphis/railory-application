@@ -32,9 +32,11 @@ Deno.serve(async (req: Request) => {
 
     const db = getServiceClient();
 
-    const [sub, usage, savedCount] = await Promise.all([
-      getUserSubscription(db, user.id),
-      getPeriodUsage(db, user.id),
+    // Sub is needed to derive the period key (billing-anniversary for paid,
+    // calendar month for free), so fetch it first and pass it through.
+    const sub = await getUserSubscription(db, user.id);
+    const [usage, savedCount] = await Promise.all([
+      getPeriodUsage(db, user.id, sub),
       getSavedCount(db, user.id),
     ]);
 
