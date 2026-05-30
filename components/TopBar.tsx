@@ -26,7 +26,7 @@ export default function TopBar({ userEmail }: { userEmail: string }) {
   }
 
   return (
-    <header className="h-12 flex-shrink-0 border-b border-hairline bg-canvas flex items-center justify-between px-6">
+    <header className="fixed top-0 left-0 right-0 z-30 h-12 border-b border-hairline bg-canvas flex items-center justify-between px-6">
       <div className="flex items-center gap-8">
         <Link
           href="/generate"

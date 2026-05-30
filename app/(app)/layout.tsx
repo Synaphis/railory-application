@@ -17,9 +17,9 @@ export default async function AppLayout({
   }
 
   return (
-    <div className="flex flex-col h-screen bg-canvas overflow-hidden">
+    <div className="h-screen bg-canvas overflow-hidden">
       <TopBar userEmail={user.email ?? ""} />
-      <main className="flex-1 min-h-0 overflow-y-auto">{children}</main>
+      <main className="h-full pt-12 overflow-y-auto">{children}</main>
     </div>
   );
 }
