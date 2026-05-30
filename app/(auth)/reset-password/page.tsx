@@ -52,8 +52,12 @@ export default function ResetPasswordPage() {
 
   return (
     <main className="min-h-screen bg-canvas flex flex-col items-center justify-center px-6">
-      <a href={MARKETING_URL} className="font-display text-xl font-medium text-near-black mb-12">
-        Railory
+      <a href={MARKETING_URL} className="flex items-center gap-2.5 mb-12 hover:opacity-80 transition-opacity">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src="/railory_logo_black.png" alt="" width={40} height={40} className="w-10 h-10" />
+        <span className="font-display text-xl font-medium text-near-black">
+          Railory
+        </span>
       </a>
 
       <div className="w-full max-w-sm">
