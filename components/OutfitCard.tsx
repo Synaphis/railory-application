@@ -105,6 +105,14 @@ interface OutfitCardProps {
   outfit: OutfitWithItems;
   onSave?: (outfitId: string) => Promise<void>;
   isSaved?: boolean;
+  /**
+   * When true, vertical wheel is fully captured for image cycling.
+   * Use on layouts where vertical page scroll has no meaningful target
+   * (e.g. the carousel on /generate). When false (default), wheel at
+   * the first/last image passes through so the page can scroll —
+   * appropriate for grid layouts (/history, /saved).
+   */
+  lockScroll?: boolean;
 }
 
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -114,6 +122,7 @@ export default function OutfitCard({
   outfit,
   onSave,
   isSaved: initialSaved = false,
+  lockScroll = false,
 }: OutfitCardProps) {
   const sorted = useMemo(() => sortByRole(outfit.items), [outfit.items]);
   const rawSeq = useMemo(() => buildInterleavedSequence(sorted), [sorted]);
@@ -157,8 +166,9 @@ export default function OutfitCard({
       const last = portraits.length - 1;
       const goingDown = e.deltaY > 0;
       const goingUp = e.deltaY < 0;
-      // Pass through to page scroll at the boundaries
-      if ((goingDown && i >= last) || (goingUp && i <= 0)) return;
+      // Pass through to page scroll at the boundaries — unless the
+      // host opts into locked scroll (carousel layouts).
+      if (!lockScroll && ((goingDown && i >= last) || (goingUp && i <= 0))) return;
 
       e.preventDefault();
       if (wheelLock.current) return;
@@ -176,7 +186,7 @@ export default function OutfitCard({
 
     el.addEventListener("wheel", handleWheel, { passive: false });
     return () => el.removeEventListener("wheel", handleWheel);
-  }, [sheetOpen, portraits.length]);
+  }, [sheetOpen, portraits.length, lockScroll]);
 
   const cur = portraits[idx] ?? null;
   const hasPreview = !!outfit.preview_image && outfit.preview_image !== "";

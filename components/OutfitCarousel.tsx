@@ -224,6 +224,7 @@ export default function OutfitCarousel({
                 outfit={outfit}
                 onSave={onSave}
                 isSaved={savedOutfitIds.has(outfit.id)}
+                lockScroll
               />
             </div>
           ))}
