@@ -1044,13 +1044,117 @@ Use a library like `Kingfisher` (Swift) or `Coil` (Kotlin) with disk cache enabl
 | Try-on               | ❌              | Network required |
 | Sign up / Sign in    | ❌              | Network required |
 
-### 13.5 Push notifications
+### 13.5 Platform-stickiness rules (mirror the web)
+
+These are **product decisions** the web app already enforces — the native apps must match to keep the stickiness story consistent.
+
+#### a) Do NOT add a "Save to Photos" / "Save to Gallery" affordance
+
+The web app deliberately removed all "Download Image" buttons so users keep coming back to the platform to view their try-ons rather than treating it as a one-shot image generator. Native apps should mirror this:
+
+- ❌ **Don't** add a `UIActivityViewController` action that saves the image to the camera roll
+- ❌ **Don't** add a long-press → "Save Image" gesture
+- ❌ **Don't** add an explicit Save button anywhere
+
+iOS users may still long-press and use the "Save to Photos" system-level action on an `<UIImage>`. That's an OS-level capability we can't prevent without rendering through canvas/SwiftUI's `.allowsHitTesting(false)` tricks (hostile, not recommended). Just don't add OUR own affordance.
+
+#### b) Share button must use the marketing-page URL, never the raw image URL
+
+The web app shares `https://railory.io/o/{outfit_id}`, which renders a branded marketing page with a "Try Railory free" CTA. Native apps must do the same.
+
+**Swift:**
+```swift
+let shareUrl = URL(string: "https://railory.io/o/\(outfit.id)")!
+let shareText = outfit.prompt.map { "Styled with Railory — \"\($0)\"" }
+  ?? "Check out my virtual try-on from Railory"
+let activityVC = UIActivityViewController(
+  activityItems: [shareText, shareUrl],
+  applicationActivities: nil
+)
+present(activityVC, animated: true)
+```
+
+**Kotlin:**
+```kotlin
+val shareUrl = "https://railory.io/o/${outfit.id}"
+val shareText = outfit.prompt?.let { "Styled with Railory — \"$it\"" }
+  ?: "Check out my virtual try-on from Railory"
+val intent = Intent(Intent.ACTION_SEND).apply {
+  type = "text/plain"
+  putExtra(Intent.EXTRA_TEXT, "$shareText\n$shareUrl")
+}
+startActivity(Intent.createChooser(intent, "Share via"))
+```
+
+**Don't** share `outfit.preview_image` (the raw bucket URL) — that lets the image spread without a path back to Railory.
+
+#### c) Watermark is handled server-side
+
+You don't need to overlay anything in the native client. The `try-on` edge function composites the Railory mark onto every image before returning it. Both `output_url` (data URL or storage URL) is already watermarked. Just render the image as-is.
+
+### 13.6 Universal Links / App Links (recommended)
+
+When a recipient receives a shared `railory.io/o/{id}` URL and clicks it on a device with the Railory app installed, the OS can open the app directly to a native outfit-view screen (instead of the browser). Much better UX than bouncing through Safari for an existing user.
+
+**iOS — Universal Links setup:**
+
+1. In the **marketing repo** (`railory-marketing`), serve a file at `public/.well-known/apple-app-site-association` (no extension, must be served as JSON):
+   ```json
+   {
+     "applinks": {
+       "details": [{
+         "appID": "TEAMID.com.railory.ios",
+         "paths": ["/o/*"]
+       }]
+     }
+   }
+   ```
+2. In the iOS app's entitlements: add Associated Domains → `applinks:railory.io`
+3. Handle the incoming URL in `App.onOpenURL` / `SceneDelegate`:
+   ```swift
+   .onOpenURL { url in
+     // Parse /o/{id} from url.pathComponents and navigate to outfit view
+     guard url.pathComponents.contains("o"),
+           let id = url.pathComponents.last else { return }
+     // Fetch via get-outfit-preview, render native screen
+   }
+   ```
+
+**Android — App Links setup:**
+
+1. Serve `public/.well-known/assetlinks.json` from the marketing repo:
+   ```json
+   [{
+     "relation": ["delegate_permission/common.handle_all_urls"],
+     "target": {
+       "namespace": "android_app",
+       "package_name": "com.railory.android",
+       "sha256_cert_fingerprints": ["<your-cert-sha256>"]
+     }
+   }]
+   ```
+2. In `AndroidManifest.xml`, add an intent filter to the activity:
+   ```xml
+   <intent-filter android:autoVerify="true">
+     <action android:name="android.intent.action.VIEW" />
+     <category android:name="android.intent.category.DEFAULT" />
+     <category android:name="android.intent.category.BROWSABLE" />
+     <data android:scheme="https" android:host="railory.io" android:pathPrefix="/o/" />
+   </intent-filter>
+   ```
+3. In the activity, intercept the URL and navigate to the native outfit screen.
+
+**Why bother:** without Universal/App Links, every shared link opens in Safari/Chrome even for users who have the app. That's a worse experience and you lose the chance to immediately deep-engage an existing user with a native screen.
+
+For the native outfit view itself, hit the public `get-outfit-preview` endpoint with the URL's outfit ID — same data the marketing page consumes. Renders fast, no auth required.
+
+### 13.7 Push notifications
 
 Not implemented in v1. If/when added:
 - Add a `device_tokens(user_id, platform, token)` table
 - Trigger candidates: subscription renewing, "near limit" warning, new product collections
 
-### 13.6 Telemetry (recommendation)
+### 13.8 Telemetry (recommendation)
 
 Track these events for product insight:
 - `prompt_submitted` (with prompt length, filters)
