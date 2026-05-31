@@ -463,7 +463,8 @@ All at `https://rkbljmsalughhsuspwoi.supabase.co/functions/v1/{name}`:
 | `generate`                | POST   | ✅            | Full outfit generation pipeline |
 | `save-outfit`             | POST   | ✅            | Save an outfit |
 | `save-outfit`             | DELETE | ✅            | Unsave an outfit |
-| `try-on`                  | POST   | ✅            | Virtual try-on (standard or preview mode) |
+| `try-on`                  | POST   | ✅            | Virtual try-on, **sync** (web — waits ~30–90s) |
+| `try-on-async`            | POST   | ✅            | Virtual try-on, **async** (native — returns in <1s with job_id, poll/subscribe to `try_on_jobs`) |
 | `profile`                 | GET    | ✅            | Fetch profile + signed avatar URL |
 | `profile`                 | PATCH  | ✅            | Update body details / location |
 | `profile`                 | POST   | ✅            | Upload custom avatar (Pro only) |
@@ -594,9 +595,11 @@ The `saved_id` is the `saved_outfits.id`, NOT the outfit ID.
 
 **Errors:** 403 `LIMIT_EXCEEDED` on save if at `saved_looks` cap.
 
-### 6.3 `try-on` — POST
+### 6.3 `try-on` — POST  (synchronous)
 
 Virtual try-on. Two modes selected by `preview` field.
+
+> ⚠️ **For native clients:** prefer `try-on-async` (§ 6.3a) for the user-triggered standard try-on. AI generation can take 30–90 seconds — beyond most native HTTP client default timeouts. The sync endpoint is still appropriate for web (web fetch tolerates long responses) and for fast preview-mode calls during outfit generation.
 
 **Request:**
 ```ts
@@ -682,6 +685,120 @@ Every image returned by `try-on` — both standard and preview mode — has the 
 Native clients **do not** overlay anything — the image arrives already watermarked. Just render `output_url` as-is.
 
 The pipeline is **fail-open at every layer**: if watermarking errors out (network blip fetching the mark, decode failure, etc.), the original AI image is returned unchanged. The user always gets a working image — watermark is an "extra" for stickiness, never a gate on the response.
+
+### 6.3a `try-on-async` — POST  (recommended for native)
+
+Async sibling of `try-on`. Same auth, same request shape, same plan checks, same watermarking — but returns in **<1 second** instead of waiting for the AI provider.
+
+**Why it exists:** native HTTP clients (`URLSession` on iOS, `OkHttp` on Android) default to ~30s timeouts. AI generation routinely exceeds that. The sync endpoint causes silent failures on slow connections — users see a timeout, but the credit was deducted and the work eventually completed server-side. Wasted credit, broken UX. The async pattern fixes this.
+
+**Request:** identical to `try-on` (see § 6.3). Same body shape.
+
+**Response (HTTP 202 Accepted):**
+```ts
+interface TryOnAsyncResponse {
+  job_id: string;     // uuid — use this to poll or subscribe
+  status: "pending";
+}
+```
+
+The credit is **deducted at this point**. If the AI work fails, the credit is automatically refunded (server-side rollback). The user never loses a credit to an AI provider failure.
+
+**Then your client must read the job's status** from the `try_on_jobs` table. Two patterns:
+
+#### Pattern A — Realtime subscription (best UX)
+
+```swift
+// Swift
+let channel = supabase.channel("try-on-\(jobId)")
+channel.onPostgresChange(
+  AnyAction.self,
+  schema: "public",
+  table: "try_on_jobs",
+  filter: "id=eq.\(jobId)"
+) { change in
+  guard let row = change.record as? [String: Any] else { return }
+  switch row["status"] as? String {
+  case "completed":
+    let outputUrl = row["output_url"] as? String
+    // Render image
+  case "failed":
+    let errorMsg = row["error"] as? String
+    // Show "We couldn't generate this — credit refunded automatically"
+  default: break  // pending / processing — keep waiting
+  }
+}
+try await channel.subscribe()
+```
+
+```kotlin
+// Kotlin
+supabase.channel("try-on-$jobId") {
+  postgresChangeFlow<PostgresAction>(schema = "public") {
+    table = "try_on_jobs"
+    filter("id", FilterOperator.EQ, jobId)
+  }.onEach { change ->
+    val row = change.record
+    when (row["status"]?.jsonPrimitive?.content) {
+      "completed" -> { /* render row["output_url"] */ }
+      "failed"    -> { /* show error, row["error"] */ }
+    }
+  }.launchIn(scope)
+}.subscribe()
+```
+
+#### Pattern B — Poll the row (fallback)
+
+If Realtime isn't connected or wasn't set up, poll every 3–5 seconds:
+
+```swift
+let row: TryOnJob = try await supabase
+  .from("try_on_jobs")
+  .select()
+  .eq("id", jobId)
+  .single()
+  .execute()
+  .value
+```
+
+Stop polling when `row.status` is `completed` or `failed`. RLS scopes the read to the calling user, so no extra auth work needed.
+
+#### Recommended native UX flow
+
+1. User taps "Try on" → call `try-on-async`
+2. Receive `job_id` in <1s → show toast: **"Generating your try-on. We'll save it to your gallery in 30–60 seconds."**
+3. Optionally navigate user to `/try-ons` (gallery) or stay in-place with a loading indicator
+4. Subscribe to the job row via Realtime
+5. On `status: 'completed'` → render or refresh gallery
+6. On `status: 'failed'` → toast: **"We couldn't generate that try-on — your credit's been refunded, try again."**
+
+#### `try_on_jobs` table reference
+
+| Column           | Type        | Notes |
+|------------------|-------------|-------|
+| `id`             | uuid (PK)   | The `job_id` returned by the endpoint |
+| `user_id`        | uuid (FK)   | Owner — RLS-scoped |
+| `outfit_id`      | uuid (FK)   | If the request was tied to an outfit (preview or saved) |
+| `request`        | jsonb       | Echo of the original POST body for retry/audit |
+| `status`         | text        | `pending` → `processing` → `completed` / `failed` |
+| `output_url`     | text        | Populated when `status='completed'` |
+| `error`          | text        | Populated when `status='failed'` |
+| `credit_charged` | boolean     | Whether the try-on credit was charged (false after rollback) |
+| `created_at`     | timestamptz | |
+| `updated_at`     | timestamptz | |
+| `completed_at`   | timestamptz | Set when `status` becomes `completed` or `failed` |
+
+#### Stuck-job safety net
+
+If the edge function instance is terminated mid-processing (rare, but possible on resource limits), the job stays at `processing` indefinitely. A SQL function `public.reclaim_stuck_jobs()` is included in the schema — it finds jobs stuck >5 minutes, marks them `failed`, and refunds the credit. Schedule it via pg_cron:
+
+```sql
+select cron.schedule('reclaim-stuck-jobs', '* * * * *',
+  $$ select public.reclaim_stuck_jobs() $$);
+```
+
+(Until pg_cron is scheduled, you can call the function manually for triage:
+`select * from public.reclaim_stuck_jobs();`)
 
 ### 6.4 `profile`
 
@@ -1280,10 +1397,13 @@ Margins documented in PRICING analysis: Starter ~80% at realistic usage, Pro ~76
 
 ```
 EDGE FUNCTIONS (auth required)
-  POST   /functions/v1/generate                       → outfit gen
+  POST   /functions/v1/generate                       → outfit gen (sync)
   POST   /functions/v1/save-outfit                    → save (body)
   DELETE /functions/v1/save-outfit?saved_id=...       → unsave
-  POST   /functions/v1/try-on                         → virtual try-on (server-side watermarked)
+  POST   /functions/v1/try-on                         → try-on sync (web)
+  POST   /functions/v1/try-on-async                   → try-on async (NATIVE)
+                                                        returns {job_id} in <1s,
+                                                        subscribe to try_on_jobs row
   GET    /functions/v1/profile                        → fetch profile
   PATCH  /functions/v1/profile                        → update body details
   POST   /functions/v1/profile                        → upload avatar (Pro)
@@ -1301,6 +1421,7 @@ DIRECT DB (RLS-protected)
   SELECT public.saved_outfits (JOIN outfits, items, products)
   SELECT public.usage WHERE period=...
   SELECT public.subscriptions WHERE user_id=auth.uid()
+  SELECT public.try_on_jobs WHERE id=$job_id   ← poll/subscribe for async try-on result
   SELECT public.brands, public.categories, public.products
 
 STORAGE (public)
