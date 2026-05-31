@@ -613,20 +613,6 @@ export default function TryOnModal({ items, outfitId, onClose }: TryOnModalProps
                       )}
                     </div>
 
-                    {/* Download / share */}
-                    {!isAngleLoading && (
-                      <div className="mt-2 flex gap-2">
-                        <a
-                          href={resultUrl}
-                          download={`railory-tryon-${activeAngle ?? "front"}.png`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="flex-1 py-2 text-center text-xs font-medium border border-hairline text-ink hover:border-ink transition-colors"
-                        >
-                          Download Image
-                        </a>
-                      </div>
-                    )}
                   </div>
                 </div>
               )}
