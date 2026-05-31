@@ -152,93 +152,103 @@ Deno.serve(async (req: Request) => {
 
     // ── Post-generation pipeline (watermark + persist) ──
     //
-    // CRITICAL INVARIANT: the user must always get a valid output_url.
-    // The watermark and persistence steps are "extras" — if any of them
-    // fail, we fall through with the AI's original image so the user
-    // never sees a broken response because of our branding/storage code.
+    // ABSOLUTE GUARANTEE: the user has paid for this try-on and MUST get
+    // their image. The watermark and persistence steps are extras for our
+    // brand/storage — they enhance our position but must never block the
+    // user's response.
     //
-    // Each sub-step is wrapped in its own try/catch so failures stay
-    // contained.
+    // Defence in depth:
+    //   - outputUrl is seeded with the AI's raw url BEFORE anything risky
+    //   - Each sub-step has its own try/catch
+    //   - applyWatermark() is internally fail-open
+    //   - The whole pipeline is also wrapped in a top-level try/catch as
+    //     a last resort — any unexpected throw falls through to returning
+    //     the AI's raw url unchanged
 
     let outputUrl = result.url;
-    let imageBytes: Uint8Array | null = null;
-    let mimeType = "image/png";
 
-    // Step 1 — decode the AI's base64 result into raw bytes.
-    // If this fails, we keep result.url as the response (no watermark,
-    // no persist, but a working image).
     try {
-      const match = result.url.match(/^data:([^;]+);base64,(.+)$/);
-      if (match) {
-        mimeType = match[1];
-        const binaryStr = atob(match[2]);
-        imageBytes = new Uint8Array(binaryStr.length);
-        for (let i = 0; i < binaryStr.length; i++) {
-          imageBytes[i] = binaryStr.charCodeAt(i);
+      let imageBytes: Uint8Array | null = null;
+      let mimeType = "image/png";
+
+      // Step 1 — decode the AI's base64 result into raw bytes
+      try {
+        const match = result.url.match(/^data:([^;]+);base64,(.+)$/);
+        if (match) {
+          mimeType = match[1];
+          const binaryStr = atob(match[2]);
+          imageBytes = new Uint8Array(binaryStr.length);
+          for (let i = 0; i < binaryStr.length; i++) {
+            imageBytes[i] = binaryStr.charCodeAt(i);
+          }
+        }
+      } catch (err) {
+        console.warn("[try-on] Decode failed:", err);
+      }
+
+      // Step 2 — apply watermark (fail-open internally)
+      if (imageBytes) {
+        imageBytes = await applyWatermark(imageBytes);
+
+        // Step 3 — re-encode as data URL for callers without outfit_id
+        try {
+          let binary = "";
+          for (let i = 0; i < imageBytes.length; i++) {
+            binary += String.fromCharCode(imageBytes[i]);
+          }
+          outputUrl = `data:${mimeType};base64,${btoa(binary)}`;
+        } catch (err) {
+          console.warn("[try-on] Re-encode failed:", err);
+        }
+      }
+
+      // Step 4 — persist to storage when outfit_id is provided
+      if (outfit_id && imageBytes) {
+        try {
+          const ext = mimeType.includes("png") ? "png" : "jpg";
+          const suffix = angle
+            ? angle
+            : isPreview
+              ? "preview"
+              : Date.now().toString();
+          const filePath = `${user.id}/${outfit_id}/${suffix}.${ext}`;
+
+          const { error: uploadErr } = await db.storage
+            .from("outfit-previews")
+            .upload(filePath, imageBytes.buffer, {
+              contentType: mimeType,
+              upsert: true,
+            });
+
+          if (!uploadErr) {
+            const { data: publicUrlData } = db.storage
+              .from("outfit-previews")
+              .getPublicUrl(filePath);
+
+            if (publicUrlData?.publicUrl) {
+              outputUrl = publicUrlData.publicUrl;
+
+              // Update preview_image on the outfit row (latest try-on)
+              await db
+                .from("outfits")
+                .update({ preview_image: outputUrl })
+                .eq("id", outfit_id);
+            }
+          } else {
+            console.error("[try-on] Upload error:", uploadErr);
+          }
+        } catch (err) {
+          console.error("[try-on] Persist error:", err);
         }
       }
     } catch (err) {
-      console.warn("[try-on] Decode of AI result failed:", err);
-    }
-
-    // Step 2 — apply watermark. applyWatermark is already fail-open
-    // (returns the original bytes on any error), so this never throws.
-    if (imageBytes) {
-      imageBytes = await applyWatermark(imageBytes);
-
-      // Step 3 — re-encode as data URL so callers without an outfit_id
-      // get the watermarked version. If encoding fails (shouldn't),
-      // outputUrl stays as the AI's raw data URL.
-      try {
-        let binary = "";
-        for (let i = 0; i < imageBytes.length; i++) {
-          binary += String.fromCharCode(imageBytes[i]);
-        }
-        outputUrl = `data:${mimeType};base64,${btoa(binary)}`;
-      } catch (err) {
-        console.warn("[try-on] Re-encode of watermarked image failed:", err);
-      }
-    }
-
-    // Step 4 — persist to storage when an outfit_id is provided.
-    // Wrapped in its own try/catch so upload errors don't propagate.
-    if (outfit_id && imageBytes) {
-      try {
-        const ext = mimeType.includes("png") ? "png" : "jpg";
-        const suffix = angle
-          ? angle
-          : isPreview
-            ? "preview"
-            : Date.now().toString();
-        const filePath = `${user.id}/${outfit_id}/${suffix}.${ext}`;
-
-        const { error: uploadErr } = await db.storage
-          .from("outfit-previews")
-          .upload(filePath, imageBytes.buffer, {
-            contentType: mimeType,
-            upsert: true,
-          });
-
-        if (!uploadErr) {
-          const { data: publicUrlData } = db.storage
-            .from("outfit-previews")
-            .getPublicUrl(filePath);
-
-          if (publicUrlData?.publicUrl) {
-            outputUrl = publicUrlData.publicUrl;
-
-            // Update preview_image on the outfit row (latest try-on)
-            await db
-              .from("outfits")
-              .update({ preview_image: outputUrl })
-              .eq("id", outfit_id);
-          }
-        } else {
-          console.error("[try-on] Upload error:", uploadErr);
-        }
-      } catch (err) {
-        console.error("[try-on] Persist error:", err);
-      }
+      // Last-resort safety net — any uncaught error in the pipeline above
+      // falls through to here, leaving outputUrl = result.url unchanged.
+      // The user gets their unmarked, unpersisted, but FUNCTIONAL image.
+      console.warn(
+        "[try-on] Post-generation pipeline failed unexpectedly — returning raw AI image:",
+        err
+      );
     }
 
     // Usage already pre-incremented in checkAndIncrementTryOn (step above)
