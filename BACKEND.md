@@ -692,9 +692,26 @@ Async sibling of `try-on`. Same auth, same request shape, same plan checks, same
 
 **Why it exists:** native HTTP clients (`URLSession` on iOS, `OkHttp` on Android) default to ~30s timeouts. AI generation routinely exceeds that. The sync endpoint causes silent failures on slow connections — users see a timeout, but the credit was deducted and the work eventually completed server-side. Wasted credit, broken UX. The async pattern fixes this.
 
-**Request:** identical to `try-on` (see § 6.3). Same body shape.
+**Request:** identical to `try-on` (see § 6.3), plus one optional field for cost protection:
 
-**Response (HTTP 202 Accepted):**
+```ts
+interface TryOnAsyncRequest extends TryOnRequest {
+  /**
+   * Optional client-generated key (a UUID is ideal). If the same key is
+   * submitted twice by the same user within 5 minutes, the server returns
+   * the EXISTING job_id and does NOT create a new job or deduct another
+   * credit. Eliminates double-tap and retry-loop double-charging.
+   *
+   * Strongly recommended for any production native client. Generate a
+   * fresh UUID per intended user action (e.g., per "Try On" button press),
+   * include it in the request body, and reuse it if you retry due to
+   * network failure.
+   */
+  idempotency_key?: string;
+}
+```
+
+**Response (HTTP 202 Accepted — new job):**
 ```ts
 interface TryOnAsyncResponse {
   job_id: string;     // uuid — use this to poll or subscribe
@@ -702,7 +719,31 @@ interface TryOnAsyncResponse {
 }
 ```
 
-The credit is **deducted at this point**. If the AI work fails, the credit is automatically refunded (server-side rollback). The user never loses a credit to an AI provider failure.
+**Response (HTTP 200 — idempotency cache hit):**
+```ts
+{
+  job_id: string;
+  status: "pending" | "processing" | "completed" | "failed";
+  output_url: string | null;
+  idempotent_hit: true;          // ← present only when the cache matched
+}
+```
+
+If `idempotent_hit` is `true`, the server found a recent job with the same `idempotency_key` and is returning it instead of creating a new one. **No credit was charged** for this retry call. Treat it the same as the original response — subscribe or poll for completion.
+
+The credit is **deducted at this point** (for new jobs only). If the AI work fails, the credit is automatically refunded (server-side rollback). The user never loses a credit to an AI provider failure.
+
+**Response (HTTP 429 — too many in-flight jobs):**
+```ts
+{
+  error: string;
+  code: "CONCURRENT_LIMIT";
+  current: number;    // jobs already in pending/processing
+  limit: number;      // currently 3
+}
+```
+
+The user has too many try-on jobs already in progress. Wait for at least one to reach `completed` or `failed`, then retry. UI suggestion: show "Working on your last try-on, hang tight..." rather than re-submitting.
 
 **Then your client must read the job's status** from the `try_on_jobs` table. Two patterns:
 
@@ -765,12 +806,18 @@ Stop polling when `row.status` is `completed` or `failed`. RLS scopes the read t
 
 #### Recommended native UX flow
 
-1. User taps "Try on" → call `try-on-async`
-2. Receive `job_id` in <1s → show toast: **"Generating your try-on. We'll save it to your gallery in 30–60 seconds."**
-3. Optionally navigate user to `/try-ons` (gallery) or stay in-place with a loading indicator
-4. Subscribe to the job row via Realtime
-5. On `status: 'completed'` → render or refresh gallery
-6. On `status: 'failed'` → toast: **"We couldn't generate that try-on — your credit's been refunded, try again."**
+1. **Generate a UUID** when the user taps "Try on". Hold it for retries.
+   ```swift
+   let idempotencyKey = UUID().uuidString
+   ```
+2. **POST** `/try-on-async` with `idempotency_key` in the body. If the network call fails / times out, retry with the **same key** — the server will dedupe.
+3. Disable the "Try on" button until the response arrives (additional client-side double-tap defense).
+4. Receive `job_id` in <1s → show toast: **"Generating your try-on. We'll save it to your gallery in 30–60 seconds."**
+5. Optionally navigate user to `/try-ons` (gallery) or stay in-place with a loading indicator.
+6. **Subscribe** to the job row via Realtime (see Pattern A above).
+7. On `status: 'completed'` → render or refresh gallery.
+8. On `status: 'failed'` → toast: **"We couldn't generate that try-on — your credit's been refunded, try again."**
+9. On 429 `CONCURRENT_LIMIT` → toast: **"Working on your last try-on, hang tight..."** instead of resubmitting.
 
 #### `try_on_jobs` table reference
 
@@ -784,6 +831,7 @@ Stop polling when `row.status` is `completed` or `failed`. RLS scopes the read t
 | `output_url`     | text        | Populated when `status='completed'` |
 | `error`          | text        | Populated when `status='failed'` |
 | `credit_charged` | boolean     | Whether the try-on credit was charged (false after rollback) |
+| `client_request_id` | text     | The `idempotency_key` from the request, if any |
 | `created_at`     | timestamptz | |
 | `updated_at`     | timestamptz | |
 | `completed_at`   | timestamptz | Set when `status` becomes `completed` or `failed` |

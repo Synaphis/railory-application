@@ -80,6 +80,7 @@ Deno.serve(async (req: Request) => {
       preview,
       outfit_id,
       pose,
+      idempotency_key,
     } = body as {
       model_image?: string;
       garments?: Garment[];
@@ -89,6 +90,13 @@ Deno.serve(async (req: Request) => {
       preview?: boolean;
       outfit_id?: string;
       pose?: string;
+      /**
+       * Optional client-generated key (UUID recommended). If the same
+       * key is submitted twice by the same user within 5 minutes, the
+       * server returns the EXISTING job_id instead of creating a new
+       * one — eliminating double-tap and retry-loop double-charging.
+       */
+      idempotency_key?: string;
     };
 
     // ── Input validation (same as sync /try-on) ──
@@ -104,6 +112,64 @@ Deno.serve(async (req: Request) => {
 
     const isPreview = preview === true;
     const db = getServiceClient();
+
+    // ── Cost protection #1: Idempotency ──
+    // If the client supplied an idempotency_key and there's a recent
+    // job (last 5 min) for this user with the same key, return it
+    // instead of creating a duplicate. Stops double-tap and retry-loop
+    // double-charging.
+    if (idempotency_key && typeof idempotency_key === "string") {
+      const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+      const { data: existing } = await db
+        .from("try_on_jobs")
+        .select("id, status, output_url")
+        .eq("user_id", user.id)
+        .eq("client_request_id", idempotency_key)
+        .gt("created_at", fiveMinAgo)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (existing) {
+        return jsonResponse(
+          {
+            job_id: existing.id,
+            status: existing.status,
+            output_url: existing.output_url,
+            idempotent_hit: true,
+          },
+          200,
+          req
+        );
+      }
+    }
+
+    // ── Cost protection #2: Per-user concurrent-job cap ──
+    // Stop a single user from spawning unlimited parallel AI work.
+    // 3 in-flight is plenty for legitimate use (a row of cards
+    // generating previews simultaneously); above that is almost
+    // certainly a buggy client or a retry storm.
+    const MAX_CONCURRENT_JOBS = 3;
+    const { count: inflight } = await db
+      .from("try_on_jobs")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", user.id)
+      .in("status", ["pending", "processing"]);
+
+    if ((inflight ?? 0) >= MAX_CONCURRENT_JOBS) {
+      return jsonResponse(
+        {
+          error:
+            `Too many try-ons in progress (${inflight} / ${MAX_CONCURRENT_JOBS}). ` +
+            `Wait for current ones to finish before starting another.`,
+          code: "CONCURRENT_LIMIT",
+          current: inflight ?? 0,
+          limit: MAX_CONCURRENT_JOBS,
+        },
+        429,
+        req
+      );
+    }
 
     // For preview mode, validate outfit ownership (same as sync /try-on)
     if (isPreview) {
@@ -157,6 +223,7 @@ Deno.serve(async (req: Request) => {
         request: body,
         status: "pending",
         credit_charged: creditCharged,
+        client_request_id: idempotency_key ?? null,
       })
       .select("id")
       .single();
