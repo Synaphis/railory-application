@@ -298,23 +298,33 @@ Product catalog with vector embeddings for semantic search. **Read-only for clie
 
 ### 2.9 `public.subscriptions`
 
-| Column                   | Type             | Notes |
-|--------------------------|------------------|-------|
-| `id`                     | uuid (PK)        | |
-| `user_id`                | uuid (FK, UNIQUE)| One sub per user |
-| `plan`                   | text             | `free` `starter` `pro` |
-| `billing_interval`       | text             | `monthly` `yearly` NULL |
-| `status`                 | text             | `active` `past_due` `canceled` `trialing` |
-| `stripe_customer_id`     | text (UNIQUE)    | |
-| `stripe_subscription_id` | text (UNIQUE)    | |
-| `current_period_start`   | timestamptz      | From `subscription.items.data[0]` (Stripe API ≥2025-04-30) |
-| `current_period_end`     | timestamptz      | |
-| `created_at`             | timestamptz      | |
-| `updated_at`             | timestamptz      | |
+**Multi-source** subscription record. One row per user, populated by whichever billing platform they used (Stripe via web, Apple IAP via iOS, Google Play via Android in Phase 2).
 
-**Grace period:** if `current_period_end + 3 days < now()`, user is treated as `free` even if `status='active'` (defends against delayed webhooks).
+| Column                          | Type             | Notes |
+|---------------------------------|------------------|-------|
+| `id`                            | uuid (PK)        | |
+| `user_id`                       | uuid (FK, UNIQUE)| One sub per user |
+| `plan`                          | text             | `free` `starter` `pro` |
+| `billing_interval`              | text             | `monthly` `yearly` NULL |
+| `status`                        | text             | `active` `past_due` `canceled` `trialing` |
+| `source`                        | text             | `free` `stripe` `apple` `google` — which billing platform owns this sub |
+| `current_period_start`          | timestamptz      | From the relevant platform (Stripe items.data[0], Apple purchaseDate, etc.) |
+| `current_period_end`            | timestamptz      | |
+| `stripe_customer_id`            | text (UNIQUE)    | Set when `source='stripe'` |
+| `stripe_subscription_id`        | text (UNIQUE)    | Set when `source='stripe'` |
+| `apple_original_transaction_id` | text (UNIQUE)    | Set when `source='apple'` — Apple's stable subscription ID across renewals |
+| `apple_product_id`              | text             | e.g. `io.railory.pro.monthly` |
+| `apple_environment`             | text             | `Sandbox` or `Production` |
+| `google_purchase_token`         | text (UNIQUE)    | Set when `source='google'` (Phase 2) |
+| `google_product_id`             | text             | (Phase 2) |
+| `created_at`                    | timestamptz      | |
+| `updated_at`                    | timestamptz      | |
 
-**RLS:** User reads own only. Writes are via service-role (webhook).
+**Grace period:** if `current_period_end + 3 days < now()`, user is treated as `free` even if `status='active'` (defends against delayed webhooks). Applies uniformly across all sources.
+
+**Plan-gating logic** (`getUserSubscription`, `checkAndIncrementGeneration`, etc.) reads `plan` only — it doesn't care about source. An iOS-subscribed Pro user gets the same experience as a web-subscribed Pro user.
+
+**RLS:** User reads own only. Writes are via service-role (Stripe + Apple webhooks).
 
 ### 2.10 `public.usage`
 
@@ -396,6 +406,25 @@ match_products(
   gender_filter text
 ) RETURNS SETOF record
 ```
+
+### 3.4 `public.reclaim_stuck_jobs`
+
+Safety-net cleanup for async jobs that never completed (e.g. function instance killed mid-AI-call). Finds rows in `try_on_jobs` / `generate_jobs` stuck in `pending` or `processing` for >5 minutes, marks them `failed`, and refunds the credit via `increment_usage(-1)`.
+
+```sql
+reclaim_stuck_jobs() RETURNS TABLE(reclaimed_try_ons int, reclaimed_generates int)
+```
+
+Schedule via pg_cron to run every minute:
+```sql
+SELECT cron.schedule(
+  'reclaim-stuck-jobs',
+  '* * * * *',
+  $$ SELECT public.reclaim_stuck_jobs() $$
+);
+```
+
+Also callable manually for triage / before-launch verification.
 
 ---
 
@@ -1033,6 +1062,91 @@ interface OutfitPreviewResponse {
 - Native Android App Link handler — same
 - Third-party integrations / API consumers (future)
 
+### 6.10 `apple-subscription-verify` — POST  (iOS only)
+
+iOS app calls this immediately after a successful StoreKit 2 purchase. Backend verifies the signed transaction against Apple's public key chain, then upserts the `subscriptions` row with `source='apple'`.
+
+**Required:** user must be authenticated with Supabase (`Authorization: Bearer <jwt>`) so we know which Railory `user_id` to attach the subscription to.
+
+**Request body:**
+```ts
+interface AppleVerifyRequest {
+  signed_transaction_info: string;   // transaction.jwsRepresentation from StoreKit 2
+}
+```
+
+**iOS client pattern (Swift):**
+```swift
+// 1. Initiate purchase, attaching Railory user_id as appAccountToken
+//    (this is critical — backend cross-checks it to prevent fraud)
+let userIdUUID = UUID(uuidString: supabase.auth.session.user.id)!
+let result = try await selectedProduct.purchase(options: [
+  .appAccountToken(userIdUUID)
+])
+
+// 2. On verified transaction, forward to our backend
+if case .success(let verification) = result,
+   case .verified(let transaction) = verification {
+  try await supabase.functions.invoke(
+    "apple-subscription-verify",
+    options: .init(body: ["signed_transaction_info": transaction.jwsRepresentation])
+  )
+  await transaction.finish()  // CRITICAL — tell Apple we've persisted it
+}
+```
+
+**Response (200):**
+```ts
+{
+  ok: true;
+  plan: "starter" | "pro";
+  billing_interval: "monthly" | "yearly";
+  current_period_end: string;   // ISO timestamp
+  environment: "Sandbox" | "Production";
+}
+```
+
+**Errors:**
+
+| Status | When |
+|---|---|
+| 400 | Missing `signed_transaction_info` / JWS verification failed / bundle ID mismatch / unknown product ID / non-subscription product type |
+| 403 | `appAccountToken` in the transaction doesn't match the authenticated user — anti-fraud guard |
+| 500 | Server misconfigured (`APPLE_BUNDLE_ID` not set) or DB upsert failed |
+
+**Restore Purchases pattern:** iOS guidelines require a "Restore Purchases" button. To implement it, iterate through `Transaction.currentEntitlements` and call this same endpoint for each — the upsert handles re-attaching the subscription to the current user_id idempotently.
+
+Full setup: [APPLE_IAP_SETUP.md](APPLE_IAP_SETUP.md).
+
+### 6.11 `apple-webhook` — POST  (no JWT — JWS-verified)
+
+App Store Server Notifications V2 endpoint. Apple POSTs subscription lifecycle events here.
+
+**URL to register in App Store Connect:**
+```
+https://rkbljmsalughhsuspwoi.supabase.co/functions/v1/apple-webhook
+```
+
+**Auth:** No JWT. Apple signs every notification with a JWS chain rooted at Apple's CA — we verify via `_shared/apple-iap.ts`. Forged notifications fail signature check.
+
+**Events handled:**
+
+| Apple notificationType | Action |
+|---|---|
+| `SUBSCRIBED`, `DID_RENEW`, `OFFER_REDEEMED`, `RENEWAL_EXTENDED` | Update plan + extend `current_period_end` |
+| `DID_FAIL_TO_RENEW` | Mark `status='past_due'` — Apple is retrying billing |
+| `EXPIRED`, `GRACE_PERIOD_EXPIRED` | Downgrade to free, clear apple_* fields |
+| `REFUND`, `REVOKE` | Same as expired — downgrade immediately |
+| `DID_CHANGE_RENEWAL_STATUS` | Log only (user toggled auto-renew) |
+| `PRICE_INCREASE` | Log only — Apple manages user consent flow |
+| `REFUND_DECLINED`, `REFUND_REVERSED` | Log only — no DB change |
+| `TEST` | Reply 200 OK (App Store Connect test fire) |
+| Others | Log + no-op |
+
+**Response:** Always returns 200 if processed (or 500 if our code failed, so Apple retries).
+
+**Verification reference:** [APPLE_IAP_SETUP.md § 5](APPLE_IAP_SETUP.md) — how to fire a test notification from App Store Connect to verify the hookup.
+
 ---
 
 ## 7. Plan limits matrix
@@ -1220,6 +1334,9 @@ For form dropdowns / pickers.
 | `preferred_currency` | ISO 4217 — `USD` `GBP` `EUR` `PKR` `AED` `SAR` `INR` `CAD` `AUD` `TRY` |
 | Plan                 | `free` `starter` `pro` |
 | Billing interval     | `monthly` `yearly` |
+| Subscription `source`| `free` `stripe` `apple` `google` |
+| Subscription `status`| `active` `past_due` `canceled` `trialing` |
+| `try_on_jobs.status` | `pending` `processing` `completed` `failed` |
 
 ---
 

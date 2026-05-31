@@ -1,878 +1,445 @@
 # Railory — System Document
 
-> Comprehensive reference for the Railory platform covering architecture, database, edge functions, storage, auth, billing, and native iOS/Android implementation guidance.
+> Multi-platform architecture reference. Railory runs on **three clients sharing one backend**: web (`app.railory.io`), iOS, and Android. This document explains how they fit together and where they differ. For exact API shapes / types / examples → see [BACKEND.md](BACKEND.md).
 
 ---
 
 ## 1. Platform Overview
 
-Railory is a prompt-driven outfit generator with AI virtual try-on. Users describe a style in natural language; the system searches a curated product catalogue via vector embeddings, assembles outfits with GPT-4o, and can render the outfit on a chosen avatar.
+Railory is a prompt-driven AI personal stylist. Users describe a vibe → the system generates outfit combinations from a curated product catalogue → renders virtual try-ons on user avatars.
 
-**Surfaces (two separate deployments):**
+### Three clients, one backend
 
-| Domain          | Repo                  | Purpose                                          |
-|-----------------|-----------------------|--------------------------------------------------|
-| `railory.io`    | `railory-marketing`   | Landing, pricing, about, contact, privacy, terms |
-| `app.railory.io`| `railory-application` | Auth, generate, try-on, billing — *this repo*    |
+```
+                           railory.io                         app.railory.io
+                              │                                     │
+                       ┌──────┴──────┐                       ┌──────┴──────┐
+                       │  Marketing  │                       │   Web App   │
+                       │  (Next.js)  │                       │  (Next.js)  │
+                       └──────┬──────┘                       └──────┬──────┘
+                              │                                     │
+                              │     ┌─────────────────────┐         │
+                              │     │     iOS App         │         │
+                              │     │ (SwiftUI, planned)  │         │
+                              │     └──────────┬──────────┘         │
+                              │                │                    │
+                              │     ┌──────────┴──────────┐         │
+                              │     │   Android App       │         │
+                              │     │ (Compose, planned)  │         │
+                              │     └──────────┬──────────┘         │
+                              │                │                    │
+                              └────────────────┴────────────────────┘
+                                               │
+                                ┌──────────────┴──────────────┐
+                                │       Supabase Backend      │
+                                │  • Postgres + pgvector      │
+                                │  • Edge Functions (Deno)    │
+                                │  • Storage (6 buckets)      │
+                                │  • Auth (email + password)  │
+                                │  • Realtime subscriptions   │
+                                └──────────────┬──────────────┘
+                                               │
+                  ┌────────────────────────────┼───────────────────────────┐
+                  │                            │                           │
+            ┌─────┴─────┐                ┌─────┴─────┐               ┌─────┴─────┐
+            │  Stripe   │                │ Apple IAP │               │  Google   │
+            │ (web pay) │                │ (iOS pay) │               │   Play    │
+            │           │                │           │               │  (future) │
+            └───────────┘                └───────────┘               └───────────┘
+```
 
-Backend lives entirely in **Supabase Edge Functions** (Deno). No Next.js API routes. The web app and any future native client share the same edge function API.
+**Domains:**
+- `railory.io` — marketing + share pages (separate Vercel project, `railory-marketing` repo)
+- `app.railory.io` — authenticated web app (this repo, `railory-application`)
 
-**Clients today:** Next.js web app on `app.railory.io`.
-**Planned:** iOS (Swift/SwiftUI), Android (Kotlin/Jetpack Compose).
+**Native apps in progress:**
+- iOS — Swift / SwiftUI, will use Apple IAP for subscriptions
+- Android — Kotlin / Jetpack Compose, will use Google Play Billing
 
 ---
 
 ## 2. Tech Stack
 
-| Layer            | Technology                                                                         |
-|------------------|------------------------------------------------------------------------------------|
-| Web frontend     | Next.js 14.2 (App Router), React 18, Tailwind CSS                                  |
-| Auth             | Supabase Auth (email + password). Password reset and change-email flows wired.     |
-| Database         | Supabase Postgres 15 with pgvector                                                 |
-| Storage          | Supabase Storage (6 buckets)                                                       |
-| Backend logic    | Supabase Edge Functions (Deno)                                                     |
-| Embeddings       | OpenAI `text-embedding-3-small`                                                    |
-| Outfit assembly  | OpenAI `gpt-4o`                                                                    |
-| Virtual try-on   | Google `gemini-2.5-flash-image` (primary), OpenAI `gpt-image-1` (fallback)         |
-| Billing          | Stripe — Checkout, Customer Portal, webhook-driven sync                            |
-| Deployment       | Vercel (web), Supabase (backend), Namecheap (DNS)                                  |
+### Backend (shared by all clients)
+
+| Layer | Tech |
+|---|---|
+| Database | Supabase Postgres 15 with pgvector |
+| Auth | Supabase Auth (email + password, JWT-based) |
+| Storage | Supabase Storage — 6 buckets, mix of public + private |
+| Edge Functions | Deno runtime, 14 deployed functions |
+| Realtime | Supabase Realtime (Postgres CDC over WebSocket) |
+| Embeddings | OpenAI `text-embedding-3-small` |
+| Outfit assembly | OpenAI `gpt-4o` |
+| Virtual try-on | Google `gemini-2.5-flash-image` (primary), OpenAI `gpt-image-1` (fallback) |
+| Billing | Stripe (web), Apple App Store (iOS), Google Play (Android) |
+| Email | Supabase Auth email service (custom HTML templates) |
+| Image processing | `imagescript` (pure-Deno, for server-side watermarking) |
+| Hosting | Vercel (web + marketing), Supabase (backend) |
+| DNS | Namecheap |
+
+### Web app
+
+| Layer | Tech |
+|---|---|
+| Framework | Next.js 14.2 (App Router), React 18, TypeScript |
+| Styling | Tailwind CSS (custom token palette) |
+| Animation | Framer Motion, Lenis (smooth scroll) |
+| Icons | Lucide React |
+| Auth SDK | `@supabase/ssr` (cookie-based sessions) |
+
+### Native apps (recommended stack)
+
+| Platform | Tech |
+|---|---|
+| iOS | Swift 5.9+, SwiftUI, [`supabase-swift`](https://github.com/supabase/supabase-swift), StoreKit 2 |
+| Android | Kotlin, Jetpack Compose, [`supabase-kt`](https://github.com/supabase-community/supabase-kt), Google Play Billing Library 7+ |
 
 ---
 
-## 3. Environment Variables
+## 3. Feature matrix — what works where
 
-### Web app (`.env.local`)
+Most features are identical across platforms. The differences below are intentional (App Store guidelines, OS capabilities, or platform-specific UX).
 
-| Variable                       | Scope  | Purpose                                                        |
-|--------------------------------|--------|----------------------------------------------------------------|
-| `NEXT_PUBLIC_SUPABASE_URL`     | client | Supabase project URL                                           |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY`| client | Supabase anon key                                              |
-| `NEXT_PUBLIC_MARKETING_URL`    | client | `https://railory.io` — link target for the wordmark            |
-| `SUPABASE_SERVICE_ROLE_KEY`    | server | Privileged DB access (SSR for `/profile`)                      |
-| `OPENAI_API_KEY`               | server | Reserved (not used at runtime in this repo today)              |
-| `GEMINI_API_KEY`               | server | Reserved (not used at runtime in this repo today)              |
+| Feature | Web | iOS | Android |
+|---|---|---|---|
+| Sign up / log in / password reset | ✅ | ✅ | ✅ |
+| Outfit generation from prompt | ✅ | ✅ | ✅ |
+| Virtual try-on (predefined avatar) | ✅ | ✅ | ✅ |
+| Virtual try-on (custom avatar, Pro) | ✅ | ✅ | ✅ |
+| Save / unsave outfits | ✅ | ✅ | ✅ |
+| Session history | ✅ | ✅ | ✅ |
+| Try-on gallery | ✅ | ✅ | ✅ |
+| Profile + body details | ✅ | ✅ | ✅ |
+| Change email / change password | ✅ | ✅ | ✅ |
+| Subscribe → **Stripe Checkout** | ✅ | ❌ | ❌ |
+| Subscribe → **Apple IAP** | ❌ | ✅ | ❌ |
+| Subscribe → **Google Play Billing** | ❌ | ❌ | ✅ (future) |
+| Manage subscription | Stripe Customer Portal | iOS Settings → Subscriptions | Google Play Subscriptions |
+| Try-on (sync — `try-on`) | ✅ | not recommended (timeouts) | not recommended (timeouts) |
+| Try-on (async — `try-on-async`) | optional | ✅ recommended | ✅ recommended |
+| Share outfit to socials | Web Share API → `railory.io/o/{id}` | UIActivityViewController → same URL | Intent.ACTION_SEND → same URL |
+| Save image to device | ❌ removed (stickiness) | ❌ no Save-to-Photos button | ❌ no Save-to-Gallery button |
+| Open shared `/o/{id}` link | Browser | Universal Link → app | App Link → app |
+| Push notifications | ❌ | ⬜ Phase 2 (APNs) | ⬜ Phase 2 (FCM) |
+| Offline viewing of saved looks | ❌ | ✅ cache locally | ✅ cache locally |
+| Deep links to retailer | `product_url` (web link) | `deep_link_ios` then web | `deep_link_android` then web |
 
-### Edge Function secrets (set via `supabase secrets set`)
+### Watermark
 
-| Secret                          | Used by                                                                                  |
-|---------------------------------|------------------------------------------------------------------------------------------|
-| `SUPABASE_URL`                  | All functions (auto-set by Supabase)                                                     |
-| `SUPABASE_ANON_KEY`             | All functions — used by `_shared/auth.ts` for JWT verification                           |
-| `SUPABASE_SERVICE_ROLE_KEY`     | All functions — privileged DB and storage operations                                     |
-| `OPENAI_API_KEY`                | `generate`, `try-on`                                                                     |
-| `GEMINI_API_KEY`                | `try-on`                                                                                 |
-| `STRIPE_SECRET_KEY`             | `create-checkout-session`, `create-portal-session`, `stripe-webhook`                     |
-| `STRIPE_WEBHOOK_SECRET`         | `stripe-webhook`                                                                         |
-| `STRIPE_PRICE_STARTER_MONTHLY`  | `create-checkout-session`, `stripe-webhook` (for reverse price-id → plan mapping)        |
-| `STRIPE_PRICE_STARTER_YEARLY`   | same                                                                                     |
-| `STRIPE_PRICE_PRO_MONTHLY`      | same                                                                                     |
-| `STRIPE_PRICE_PRO_YEARLY`       | same                                                                                     |
-| `APP_URL`                       | `create-checkout-session`, `create-portal-session` — checkout success/cancel URLs        |
-| `ALLOWED_ORIGINS`               | All functions — comma-separated CORS allowlist (e.g. `https://app.railory.io,https://railory.io`) |
-
-### Native apps
-
-Compile in just two values:
-
-- `SUPABASE_URL`
-- `SUPABASE_ANON_KEY`
-
-Both are public-safe. All privileged work happens server-side inside edge functions using the service role key.
+**Every** try-on image, regardless of source client, is server-side watermarked with the Railory mark in the bottom-right corner. Clients render the image as-is. See [BACKEND.md §6.3](BACKEND.md) for details.
 
 ---
 
-## 4. Authentication
+## 4. Authentication (shared model)
 
-### Architecture
+All clients use **Supabase Auth** with the same flows:
 
-Supabase Auth issues a short-lived **access token** (JWT) and a long-lived **refresh token** on sign-in. The web app uses cookie-based sessions via `@supabase/ssr`. Native apps use the official Supabase SDK which manages tokens automatically.
+| Flow | All clients |
+|---|---|
+| Sign up | `supabase.auth.signUp({ email, password, options: { emailRedirectTo, captchaToken? } })` |
+| Confirm email | Email link → `/auth/callback?code=...` → `exchangeCodeForSession` → `/post-auth` |
+| Log in | `supabase.auth.signInWithPassword({ email, password })` |
+| Forgot password | `supabase.auth.resetPasswordForEmail(email, { redirectTo: ... })` |
+| Reset password | Email link → recovery session → `updateUser({ password })` |
+| Change email | `updateUser({ email }, { emailRedirectTo })` → confirmation to new email |
+| Sign out | `supabase.auth.signOut()` |
 
-**Every edge function call** (except `stripe-webhook`) requires:
+### Platform-specific nuances
 
-```
-Authorization: Bearer <access_token>
-```
+| Platform | Callback URL scheme | Notes |
+|---|---|---|
+| Web | `https://app.railory.io/auth/callback` | Cookie-based session via `@supabase/ssr` |
+| iOS | `railory://auth-callback` | Universal Link OR custom URL scheme. Configure in Supabase → Auth → Redirect URLs. |
+| Android | `railory://auth-callback` | App Link OR custom URL scheme. Same Supabase config. |
 
-The Supabase gateway validates the JWT (`verify_jwt: true`) before the function runs. Inside the function, `_shared/auth.ts` extracts the user via `supabase.auth.getUser(token)`.
+The web app cookie scope is `app.railory.io` — cookies do NOT cross to `railory.io`, so the marketing site cannot read auth state. Native apps use Keychain (iOS) / EncryptedSharedPreferences (Android) for token persistence via the official Supabase SDK.
 
-### Auth flows
+### Signup hardening (live as of latest deploy)
 
-| Flow              | Trigger                                           | Endpoint / SDK call                                                                  |
-|-------------------|---------------------------------------------------|--------------------------------------------------------------------------------------|
-| Sign up           | `/signup` form                                    | `supabase.auth.signUp({ email, password, options: { emailRedirectTo } })`            |
-| Sign in           | `/login` form                                     | `supabase.auth.signInWithPassword({ email, password })`                              |
-| Sign out          | TopBar button                                     | `supabase.auth.signOut()`                                                            |
-| Email confirmation| Link in confirm-signup email                      | `GET /auth/callback?code=...&next=/post-auth` → `exchangeCodeForSession(code)`       |
-| Forgot password   | `/forgot-password` form                           | `supabase.auth.resetPasswordForEmail(email, { redirectTo: ... /auth/callback?next=/reset-password })` |
-| Reset password    | Link in reset email                               | Same callback → lands on `/reset-password` with recovery session → `updateUser({ password })` |
-| Change email      | Profile page → Account section                    | `supabase.auth.updateUser({ email }, { emailRedirectTo: ... /auth/callback?next=/profile })` |
+- Client-side disposable email blocklist (~30 known throwaway services)
+- Password minimum 8 chars (was 6) — existing users unaffected
+- Cloudflare Turnstile captcha (env-gated — dormant until `NEXT_PUBLIC_TURNSTILE_SITE_KEY` is set + Supabase dashboard captcha enabled)
 
-### Auth callback (`/auth/callback`)
-
-Single route handler that exchanges any `code` query param for a session and redirects to the `next` param (default `/post-auth`). The `next` param is validated to only allow same-origin relative paths (prevents open redirects).
-
-### Post-auth handler (`/post-auth`)
-
-Client-side router that reads `sessionStorage.pending_checkout` (set if the user came from a marketing-site pricing card). If present, fires Stripe checkout immediately. Otherwise redirects to `/generate`.
-
-### Email templates
-
-Branded HTML email templates live in `supabase/email-templates/`:
-
-- `confirm-signup.html`
-- `reset-password.html`
-- `change-email.html`
-
-These are pasted into **Supabase dashboard → Authentication → Emails → Templates** (one per template, with corresponding subject line). They use the Railory logo from a public Supabase Storage URL so they render in every email client without external DNS dependencies. See section 6 for the storage path.
-
-### Middleware
-
-`middleware.ts` → `lib/supabase/middleware.ts` runs on every request:
-
-- **Protected** (redirect to `/login` if not authed): `/generate`, `/try-ons`, `/saved`, `/history`, `/profile`, `/billing`
-- **Auth-only** (redirect to `/generate` if already authed): `/login`, `/signup`, `/forgot-password`
-- **Neither** (works in both states): `/reset-password`, `/post-auth`, `/auth/callback`, `/`
-
-Native apps should implement equivalent guards.
+See [SECURITY_CHECKLIST.md](SECURITY_CHECKLIST.md) for dashboard steps to flip captcha + HaveIBeenPwned + complexity rules on.
 
 ---
 
-## 5. Database Schema
+## 5. Subscriptions & Billing (multi-source)
 
-### 5.1 `users`
-
-Application-level user row, extending `auth.users`. Created automatically on signup via DB trigger.
-
-| Column                 | Type        | Notes                                                                                |
-|------------------------|-------------|--------------------------------------------------------------------------------------|
-| `id`                   | uuid (PK)   | Same as `auth.users.id`                                                              |
-| `email`                | text        | Mirrored from auth                                                                   |
-| `full_name`            | text        | Optional display name                                                                |
-| `custom_avatar_url`    | text        | **Storage path** (not URL) in `user-avatars` bucket — resolved to signed URL on read |
-| `height_cm`            | integer     | Body profile                                                                         |
-| `weight_kg`            | integer     | Body profile                                                                         |
-| `body_type`            | text        | `slim`, `athletic`, `medium`, `curvy`, `plus`                                        |
-| `gender_presentation`  | text        | `female`, `male`, `androgynous`                                                      |
-| `skin_tone`            | text        | `light`, `fair`, `medium`, `olive`, `brown`, `dark`                                  |
-| `hair_colour`          | text        | Free text                                                                            |
-| `hair_length`          | text        | `bald`, `short`, `medium`, `long`                                                    |
-| `age_range`            | text        | `18-24`, `25-34`, `35-44`, `45-54`, `55+`                                            |
-| `country`              | text        | ISO 3166-1 alpha-2 code (`US`, `GB`, `PK`, …)                                        |
-| `preferred_currency`   | text        | ISO 4217 (`USD`, `GBP`, `EUR`, …)                                                    |
-| `created_at`           | timestamptz | Auto                                                                                 |
-
-### 5.2 `brands`, `categories`, `products`
-
-The product catalogue. Each product has a 1536-d vector embedding for semantic search. See `scripts/` for full schemas — the relevant columns for clients are:
-
-- `id`, `name`, `description`, `price`, `currency`, `original_price`
-- `images[]` (URLs), `colours[]`, `style_tags[]`, `occasion_tags[]`, `aesthetic_tags[]`
-- `product_url` (web), `deep_link_ios`, `deep_link_android` (native apps)
-- `brand_id` → `brands.name`, `category_id` → `categories.name`
-
-### 5.3 `outfit_sessions`
-
-One row per "user prompt" event. Initial generation + refinements share a session.
-
-| Column           | Type        |
-|------------------|-------------|
-| `id`             | uuid (PK)   |
-| `user_id`        | uuid (FK)   |
-| `initial_prompt` | text        |
-| `filters`        | jsonb       |
-| `created_at`     | timestamptz |
-
-### 5.4 `outfits`
-
-| Column          | Type        | Notes                                                                                                |
-|-----------------|-------------|------------------------------------------------------------------------------------------------------|
-| `id`            | uuid (PK)   |                                                                                                      |
-| `session_id`    | uuid (FK)   |                                                                                                      |
-| `prompt_used`   | text        | May differ from session's initial_prompt (refinements)                                               |
-| `ai_reasoning`  | text        | GPT-4o's editorial styling rationale                                                                 |
-| `total_price`   | numeric     |                                                                                                      |
-| `preview_image` | text        | Public URL in `outfit-previews` bucket. NULL until preview generates. Persisted across sessions.     |
-| `created_at`    | timestamptz |                                                                                                      |
-
-### 5.5 `outfit_items`
-
-| Column       | Type      | Notes                                          |
-|--------------|-----------|------------------------------------------------|
-| `id`         | uuid (PK) |                                                |
-| `outfit_id`  | uuid (FK) |                                                |
-| `product_id` | uuid (FK) |                                                |
-| `role`       | text      | `top`, `bottom`, `shoe`, `jacket`, `boots`     |
-
-### 5.6 `saved_outfits`
-
-| Column        | Type        | Notes                                           |
-|---------------|-------------|-------------------------------------------------|
-| `id`          | uuid (PK)   |                                                 |
-| `user_id`     | uuid (FK)   |                                                 |
-| `outfit_id`   | uuid (FK)   |                                                 |
-| `notes`       | text        | Optional, not yet exposed in UI                 |
-| `saved_at`    | timestamptz |                                                 |
-
-Unique constraint on `(user_id, outfit_id)` — multiple saves of the same outfit are idempotent.
-
-### 5.7 `subscriptions`
-
-One row per user. Auto-created on signup with `plan='free'`. Stripe fields populated by the `stripe-webhook` edge function.
-
-| Column                   | Type        | Notes                                                                              |
-|--------------------------|-------------|------------------------------------------------------------------------------------|
-| `id`                     | uuid (PK)   |                                                                                    |
-| `user_id`                | uuid (FK, unique) | One subscription per user                                                    |
-| `plan`                   | text        | `'free'`, `'starter'`, or `'pro'`                                                  |
-| `billing_interval`       | text        | `'monthly'`, `'yearly'`, or NULL (free)                                            |
-| `status`                 | text        | `'active'`, `'past_due'`, `'canceled'`, `'trialing'`                               |
-| `stripe_customer_id`     | text (unique) |                                                                                  |
-| `stripe_subscription_id` | text (unique) |                                                                                  |
-| `current_period_start`   | timestamptz | Read from `subscription.items.data[0]` (Stripe API 2025-04-30+ moved it there)     |
-| `current_period_end`     | timestamptz | Same                                                                               |
-| `created_at`             | timestamptz |                                                                                    |
-| `updated_at`             | timestamptz |                                                                                    |
-
-**Grace period:** if `current_period_end` is in the past by more than 3 days, the user is treated as `free` even if `status='active'` (defends against delayed webhooks).
-
-### 5.8 `usage`
-
-Rolling usage counters keyed by **period**. The period key model:
-
-- **Free users**: calendar-month UTC, formatted `YYYY-MM-01` (e.g. `2026-05-01`).
-- **Paid users**: the most recent monthly anniversary of their `subscription.current_period_start`, formatted `YYYY-MM-DD` (e.g. `2026-05-24` → `2026-06-24` → `2026-07-24` …).
-- **Yearly subscribers**: the anchor walks forward one month at a time within the yearly billing cycle. "200/month" really means 200 each month for 12 months, not 2,400 spread across the year.
-
-A new period key has no row → counter returns zero → counter resets cleanly without any cron job.
-
-| Column         | Type        | Notes                                              |
-|----------------|-------------|----------------------------------------------------|
-| `id`           | uuid (PK)   |                                                    |
-| `user_id`      | uuid (FK)   |                                                    |
-| `period`       | text        | `YYYY-MM-DD` (paid) or `YYYY-MM-01` (free)         |
-| `generations`  | int         | Outfit generations this period                     |
-| `try_ons`      | int         | Virtual try-ons this period                        |
-| `saved_looks`  | int         | Legacy — actual saved count comes from `saved_outfits` |
-| `created_at`   | timestamptz |                                                    |
-| `updated_at`   | timestamptz |                                                    |
-
-Unique constraint on `(user_id, period)`.
-
-### 5.9 RPC: `check_and_increment_usage`
-
-Atomic check-and-increment for limit enforcement. Holds a `SELECT FOR UPDATE` row lock so concurrent callers serialize — there's no window where two requests can both wrongly succeed or both wrongly fail at the limit boundary.
+### One `subscriptions` table, three sources
 
 ```
-check_and_increment_usage(
-  p_user_id uuid,
-  p_period  text,         -- YYYY-MM-DD or YYYY-MM-01
-  p_field   text,         -- 'generations' or 'try_ons'
-  p_limit   int           -- the plan's limit for this field
-) → table(allowed bool, new_count int)
+public.subscriptions
+  user_id │ plan │ status │ source │ current_period_end │ ...
+  uuid    │ pro  │ active │ stripe │ 2027-05-30         │ stripe_subscription_id, ...
+  uuid    │ pro  │ active │ apple  │ 2027-05-30         │ apple_original_transaction_id, ...
+  uuid    │ pro  │ active │ google │ 2027-05-30         │ google_purchase_token, ...
 ```
 
-Returns `(true, new_count)` if the increment succeeded, or `(false, current_count)` if at/over the limit (no increment performed).
+The `source` column says where the subscription came from. Plan-gating logic (`getUserSubscription`, `checkAndIncrementGeneration`, etc.) reads the same row regardless — they don't care about source.
 
-### 5.10 RPC: `increment_usage`
+### Pricing matches across platforms
 
-Simple atomic upsert (`INSERT … ON CONFLICT DO UPDATE`). Used for rollback when an AI call fails after a successful `check_and_increment_usage`.
+| Plan | Stripe (web) | Apple IAP (iOS) | Google Play (Android) |
+|---|---|---|---|
+| Starter Monthly | $9.99 | $9.99 (`io.railory.starter.monthly`) | same |
+| Starter Yearly | $95 | $95 (`io.railory.starter.yearly`) | same |
+| Pro Monthly | $24.99 | $24.99 (`io.railory.pro.monthly`) | same |
+| Pro Yearly | $239 | $239 (`io.railory.pro.yearly`) | same |
 
-```
-increment_usage(
-  p_user_id uuid,
-  p_period  text,
-  p_field   text,
-  p_amount  int default 1   -- pass -1 to rollback
-) → void
-```
+Pricing tiers may be ±1 cent in non-US storefronts due to Apple/Google's fixed-tier pricing systems. This is expected.
 
-### 5.11 RPC: `match_products`
+### What each source uses
 
-Vector similarity search over the product catalogue.
+| Source | Subscribe via | Manage via | Webhook handler |
+|---|---|---|---|
+| `stripe` | Stripe Checkout (`create-checkout-session`) | Stripe Customer Portal (`create-portal-session`) | `stripe-webhook` |
+| `apple` | StoreKit 2 in iOS app → `apple-subscription-verify` | iOS Settings → Subscriptions | `apple-webhook` (App Store Server Notifications V2) |
+| `google` | Play Billing Library in Android app → `google-subscription-verify` (Phase 2) | Google Play Store → Subscriptions | `google-webhook` (Real-time Developer Notifications, Phase 2) |
 
-```
-match_products(
-  query_vector  vector(1536),
-  match_count   integer,
-  price_max     numeric,
-  price_min     numeric,
-  gender_filter text
-) → setof record
-```
+### Plan-gating works the same regardless of source
 
-Returns products sorted by cosine similarity, filtered by price + gender. Used by the `generate` edge function.
+Every consuming function (`generate`, `try-on`, `try-on-async`, `profile` for avatar uploads, etc.) calls helpers from `_shared/subscription.ts`:
+
+- `getUserSubscription(db, userId)` — returns the subscription row, applies grace period
+- `checkAndIncrementGeneration(...)` / `checkAndIncrementTryOn(...)` — atomic limit check + decrement
+- `checkSavedLimit(...)` — total saved looks cap
+- `checkCustomAvatarAllowed(...)` — Pro-only feature gate
+- `getAllowedAngles(...)` — try-on angle restriction by plan
+
+These never read `subscription.source` — they only read `subscription.plan`. So iOS-subscribed Pro users get the exact same Pro experience as web-subscribed Pro users.
+
+### Per-platform subscription rules to know
+
+1. **iOS:** App Store guideline 3.1.1 forbids mentioning external payment in the iOS app. The iOS subscription UI must say "Manage in App Store" not "Manage at railory.io".
+2. **Android:** Google Play has similar rules but slightly more permissive (you can mention web payment for cross-platform users since the 2023 Epic v. Google ruling, but only in non-purchase flows).
+3. **Web:** the existing Stripe flow is fine — no restrictions on mentioning Stripe.
+
+### Edge cases (designed but not yet UI'd)
+
+- **User subscribed via web tries to subscribe via iOS:** the Apple webhook would overwrite the Stripe row, orphaning the Stripe sub (it'd keep billing until canceled at Stripe). Recommended UX: detect existing Stripe sub on iOS launch, show "You're already subscribed via web. Cancel there first" message.
+- **User cancels Apple sub, doesn't resubscribe on web:** Apple webhook fires `EXPIRED` → row reverts to `plan='free'`. Works correctly.
+
+Full Apple IAP setup walkthrough: [APPLE_IAP_SETUP.md](APPLE_IAP_SETUP.md).
 
 ---
 
-## 6. Storage Buckets
+## 6. Database (high-level)
 
-| Bucket             | Public | Purpose                                                                                |
-|--------------------|--------|----------------------------------------------------------------------------------------|
-| `avatars`          | Yes    | 12 predefined 3D-rendered avatar images (`f-1.png` through `a-4.png`)                  |
-| `user-avatars`     | No     | User-uploaded custom avatars. Path: `{user_id}/avatar.{ext}`. Signed-URL access.       |
-| `product-images`   | Yes    | Product catalogue images                                                               |
-| `outfit-previews`  | Yes    | Persisted try-on preview images. Path: `{user_id}/{outfit_id}.png`                     |
-| `generated-outfits`| No     | Reserved for future use                                                                |
-| `brand`            | Yes    | Brand assets (logo PNG used by transactional emails)                                   |
+10 tables in the `public` schema. Full column-by-column reference in [BACKEND.md §2](BACKEND.md).
 
-### Public URL pattern
+| Table | Purpose | RLS |
+|---|---|---|
+| `users` | App-level user (extends `auth.users`); body profile fields | User reads/writes own |
+| `brands`, `categories` | Product catalog metadata | Read-all |
+| `products` | Product catalog + vector embeddings | Read-all |
+| `outfit_sessions` | One per user "generate" event | User reads own |
+| `outfits` | Individual outfit combos within a session | User reads own (via session join) |
+| `outfit_items` | Products assigned to outfits with role | Through outfit |
+| `saved_outfits` | User bookmarks | User reads/writes own |
+| `subscriptions` | One per user, multi-source (Stripe/Apple/Google) | User reads own; webhooks write via service role |
+| `usage` | Per-period counters (generations, try-ons) | User reads own; edge functions write via service role |
+| `try_on_jobs` | Async try-on queue (status, output URL, error) | User reads own; edge functions write |
+| `generate_jobs` | Async generate queue (Phase 2 scaffold, not yet active) | User reads own |
 
-```
-{SUPABASE_URL}/storage/v1/object/public/{bucket}/{path}
-```
+### RPCs
 
-Examples:
-
-- Predefined avatar: `{SUPABASE_URL}/storage/v1/object/public/avatars/f-1.png`
-- Brand logo (used in emails): `{SUPABASE_URL}/storage/v1/object/public/brand/railory_logo_black.png`
-- Outfit preview: `{SUPABASE_URL}/storage/v1/object/public/outfit-previews/{user_id}/{outfit_id}.png`
-
-### Signed URLs for private buckets
-
-`user-avatars` is private. The `profile` edge function generates a 1-hour signed URL whenever a profile is fetched. Native clients should re-fetch the profile to refresh expired URLs.
-
----
-
-## 7. Edge Functions
-
-All edge functions are at `https://<project>.supabase.co/functions/v1/<name>`.
-
-Every function except `stripe-webhook` requires `Authorization: Bearer <access_token>`. CORS allowlist is enforced via the `ALLOWED_ORIGINS` secret.
-
-Shared helpers in `_shared/`:
-
-- `auth.ts` — `authenticateRequest()`, `getServiceClient()`, CORS helpers, rate limit
-- `plans.ts` — `PLAN_LIMITS`, `getLimits()`, `getStripePriceId()`, `planFromPriceId()`
-- `subscription.ts` — period model, atomic check/increment, limit helpers, error responses
-- `try-on.ts` — `generateTryOnImage()`, prompt builder, Gemini/OpenAI strategy
-- `currency.ts` — price conversion, brand-shipping scoring
-
-### 7.1 `generate`
-
-**Purpose:** Full outfit generation pipeline.
-
-**Method:** `POST`
-
-**Request:**
-```json
-{
-  "prompt": "smart casual outfit for a summer date under $200",
-  "filters": {
-    "budget_min": 0,
-    "budget_max": 200,
-    "gender": "mens",
-    "brands": []
-  },
-  "session_id": null
-}
-```
-
-**Pipeline:**
-
-1. Atomic limit check via `check_and_increment_usage` — rejects with 403 `LIMIT_EXCEEDED` if at cap.
-2. Create session (if `session_id` is null).
-3. Embed prompt via OpenAI `text-embedding-3-small`.
-4. Vector search via `match_products` (40 candidates).
-5. Send candidates + prompt to GPT-4o — returns 4 outfit combinations.
-6. Validate product IDs (filter hallucinations).
-7. Save outfits + items.
-8. Return enriched response.
-9. On any failure post-increment, calls `incrementUsage(-1)` to rollback the counter.
-
-**Response:**
-```json
-{
-  "session_id": "uuid",
-  "outfits": [
-    {
-      "id": "uuid",
-      "session_id": "uuid",
-      "prompt_used": "...",
-      "ai_reasoning": "A relaxed summer look with...",
-      "total_price": 149.97,
-      "created_at": "2026-05-24T...",
-      "items": [
-        {
-          "product": {
-            "id": "uuid",
-            "name": "Linen Blend Shirt",
-            "brand_name": "Zara",
-            "category_name": "Tops",
-            "price": 35.99,
-            "currency": "USD",
-            "images": ["https://..."],
-            "colours": ["White"],
-            "product_url": "https://...",
-            "deep_link_ios": null,
-            "deep_link_android": null
-          },
-          "role": "top"
-        }
-      ]
-    }
-  ]
-}
-```
-
-### 7.2 `save-outfit`
-
-**Save — POST:**
-```json
-{ "outfit_id": "uuid" }
-```
-Response: `{ "saved": true }`. Checks `saved_looks` total cap first.
-
-**Unsave — DELETE** with query param `?saved_id=uuid` (the `saved_outfits.id`, not the outfit ID).
-Response: `{ "saved": false }`.
-
-### 7.3 `try-on`
-
-**Purpose:** AI virtual try-on. Two modes:
-
-- **Standard** (user-triggered, counts against `try_ons` limit)
-- **Preview** (free, auto-generated after a new outfit is created)
-
-**Method:** `POST`
-
-**Request:**
-```json
-{
-  "model_image": "https://...avatar-url.png",
-  "garments": [
-    { "role": "top", "image": "https://...", "name": "Linen Shirt" },
-    { "role": "bottom", "image": "https://...", "name": "Chinos" },
-    { "role": "shoe", "image": "https://...", "name": "Loafers" }
-  ],
-  "angle": null,
-  "reference_image": null,
-  "body_context": null,
-  "preview": false,
-  "outfit_id": null,
-  "pose": null
-}
-```
-
-| Field             | Type             | Notes                                                                 |
-|-------------------|------------------|-----------------------------------------------------------------------|
-| `model_image`     | URL              | Avatar URL (predefined public or signed URL for custom)               |
-| `garments`        | array            | Min 1. Each: `role`, `image` (URL), `name`                            |
-| `angle`           | string?          | `front`, `back`, `left-side`, `right-side`, `three-quarter`, `close-up-top`, `close-up-bottom` |
-| `reference_image` | string?          | Base64 data URL of previous result, for angle consistency             |
-| `body_context`    | object?          | Sent when using custom avatar: `height_cm`, `weight_kg`, `body_type`, `gender_presentation`, `skin_tone` |
-| `preview`         | boolean          | `true` = free preview, no usage counted. Requires `outfit_id`.        |
-| `outfit_id`       | string?          | Required when `preview: true`                                         |
-| `pose`            | string?          | Pose instruction for preview variety (preview-only)                   |
-
-**Standard mode:** atomic limit check, returns base64 data URL.
-**Preview mode:** no limits, persists to `outfit-previews` bucket, returns public URL, writes URL into `outfits.preview_image`.
-
-**Preview poses** (cycled by outfit index 0–3):
-
-| Index | Pose                                                            |
-|-------|-----------------------------------------------------------------|
-| 0     | Standing straight, arms relaxed at sides, feet together         |
-| 1     | Arms crossed over chest, composed editorial stance              |
-| 2     | One hand on hip, weight shifted, confident                      |
-| 3     | Both hands in pockets, relaxed slouch                           |
-
-**Provider strategy:**
-1. Try Gemini 2.5 Flash Image (cheaper).
-2. Fallback to OpenAI `gpt-image-1` (1024×1024, low quality, ~$0.011/image).
-
-**Response:**
-```json
-{ "output_url": "https://...storage/.../{outfit_id}.png" }
-```
-
-Preview returns the persisted public URL. Standard returns a base64 data URL.
-
-### 7.4 `profile`
-
-| Method | Purpose                  | Body                            | Response                            |
-|--------|--------------------------|---------------------------------|-------------------------------------|
-| GET    | Fetch profile            | —                               | Profile + signed `custom_avatar_url`|
-| PATCH  | Update body details      | Subset of profile fields        | `{ "ok": true }`                    |
-| POST   | Upload custom avatar     | `multipart/form-data` `avatar`  | `{ "custom_avatar_url": "..." }`    |
-
-**Avatar upload** is gated to the `pro` plan (returns 403 `FEATURE_GATED` otherwise).
-
-### 7.5 `create-checkout-session`
-
-**POST:**
-```json
-{ "plan": "starter" | "pro", "interval": "monthly" | "yearly" }
-```
-
-Resolves to a Stripe Price ID, creates a Stripe Checkout Session, returns `{ "url": "https://checkout.stripe.com/..." }`. The client redirects there. Success returns to `${APP_URL}/billing?success=true`.
-
-### 7.6 `create-portal-session`
-
-**POST** (no body). Returns `{ "url": "https://billing.stripe.com/..." }`. Requires the user to already have a `stripe_customer_id` (i.e. has subscribed at least once).
-
-### 7.7 `get-usage`
-
-**GET** (no body). Returns the user's plan, limits, and current-period usage for billing UI.
-
-```json
-{
-  "plan": "starter",
-  "status": "active",
-  "billing_interval": "yearly",
-  "current_period_end": "2027-05-24T23:12:40+00:00",
-  "limits": {
-    "generations": 50,
-    "try_ons": 30,
-    "saved_looks": 50,
-    "try_on_angles": 3,
-    "custom_avatar": false
-  },
-  "usage": {
-    "generations": 12,
-    "try_ons": 5,
-    "saved_looks": 8
-  }
-}
-```
-
-The `usage` figures reflect the user's *current monthly period* — billing-anniversary for paid plans, calendar month for free.
-
-### 7.8 `stripe-webhook`
-
-**POST** — Stripe calls this directly, `verify_jwt: false`. Signature verified via `STRIPE_WEBHOOK_SECRET`.
-
-Endpoint URL to register in Stripe dashboard:
-
-```
-https://<project>.supabase.co/functions/v1/stripe-webhook
-```
-
-Events handled:
-
-| Event                            | Action                                                                   |
-|----------------------------------|--------------------------------------------------------------------------|
-| `checkout.session.completed`     | Activate subscription, set plan + billing interval + period dates        |
-| `invoice.paid`                   | Renew period dates, confirm `status='active'`                            |
-| `customer.subscription.updated`  | Plan/status change                                                       |
-| `customer.subscription.deleted`  | Downgrade to free                                                        |
-
-**Important:** period dates are read from `subscription.items.data[0].current_period_start/end` (Stripe API 2025-04-30+ moved them from the top-level Subscription object). A `getPeriodDates()` helper falls back to the top-level fields for older API versions.
-
-### 7.9 Plan limits
-
-| Feature                   | Free | Starter             | Pro                  |
-|---------------------------|------|---------------------|----------------------|
-| Price                     | $0   | $19/mo or $190/yr   | $39/mo or $390/yr    |
-| Generations / month       | 5    | 50                  | 200                  |
-| Virtual try-ons / month   | 0    | 30                  | 100                  |
-| Saved looks (total cap)   | 10   | 50                  | 500                  |
-| Try-on angles             | 0    | 3 (front, back, left)| 7 (all angles)      |
-| Custom avatar upload      | No   | No                  | Yes                  |
-
-### 7.10 Error responses
-
-**Limit exceeded** (HTTP 403):
-```json
-{
-  "error": "generations limit reached",
-  "code": "LIMIT_EXCEEDED",
-  "resource": "generations",
-  "current": 50,
-  "limit": 50,
-  "plan": "starter",
-  "upgrade_url": "/billing"
-}
-```
-
-**Feature gated** (HTTP 403):
-```json
-{
-  "error": "Custom avatar is not available on the starter plan",
-  "code": "FEATURE_GATED",
-  "feature": "Custom avatar",
-  "plan": "starter",
-  "upgrade_url": "/billing"
-}
-```
-
-**Auth failure** (HTTP 401): `{ "error": "Unauthorized" }`
-**Rate limited** (HTTP 429): `{ "error": "Too many requests" }`
+| Function | Purpose |
+|---|---|
+| `check_and_increment_usage(user_id, period, field, limit)` | Atomic limit check + decrement (row lock) |
+| `increment_usage(user_id, period, field, amount)` | Simple atomic upsert (used for rollback) |
+| `match_products(query_vector, count, price_max, price_min, gender)` | Vector similarity search |
+| `reclaim_stuck_jobs()` | Find async jobs stuck >5min, mark failed, refund credits. Scheduled via pg_cron. |
 
 ---
 
-## 8. Predefined Avatars
+## 7. Storage Buckets
 
-12 3D-rendered avatars in the public `avatars` bucket. Diverse across gender, ethnicity, body type.
+| Bucket | Public | Used by |
+|---|---|---|
+| `avatars` | ✅ | 12 predefined avatar images |
+| `user-avatars` | ❌ (signed URL) | Custom uploaded avatars (Pro feature) |
+| `product-images` | ✅ | Product catalog images |
+| `outfit-previews` | ✅ | Persisted watermarked try-on results |
+| `generated-outfits` | ❌ | Reserved for future |
+| `brand` | ✅ | Brand assets — email logo, try-on watermark |
 
-| ID    | Name   | Gender      | Description                            |
-|-------|--------|-------------|----------------------------------------|
-| `f-1` | Amara  | Female      | Young Black woman, slim                |
-| `f-2` | Sofia  | Female      | Latina, mid-20s, medium                |
-| `f-3` | Mei    | Female      | East Asian, petite                     |
-| `f-4` | Priya  | Female      | South Asian, curvy                     |
-| `m-1` | James  | Male        | White, athletic, 30s                   |
-| `m-2` | Kwame  | Male        | Black, tall, lean                      |
-| `m-3` | Ravi   | Male        | South Asian, medium                    |
-| `m-4` | Kenji  | Male        | East Asian, slim, 20s                  |
-| `a-1` | River  | Androgynous | Mixed-race, lean                       |
-| `a-2` | Sam    | Androgynous | White, medium, 40s                     |
-| `a-3` | Jules  | Androgynous | Black, athletic                        |
-| `a-4` | Noor   | Androgynous | Middle-Eastern, slim                   |
-
-**URL pattern:** `{SUPABASE_URL}/storage/v1/object/public/avatars/{id}.png`
-
-**Image specs:** Full-body, front-facing, neutral pose, plain background, fitted base clothing, ≥768×1024px.
+URL pattern: `https://rkbljmsalughhsuspwoi.supabase.co/storage/v1/object/public/{bucket}/{path}`
 
 ---
 
-## 9. Web App Structure
+## 8. Edge Functions (current inventory)
 
-### Routes
+14 functions deployed. All require JWT auth unless noted.
 
-| Route               | Description                                                                                  |
-|---------------------|----------------------------------------------------------------------------------------------|
-| `/`                 | Auth-aware: redirects authed users to `/generate`, guests to `/login`                        |
-| `/login`            | Email/password login, with "Forgot password?" link                                           |
-| `/signup`           | Registration                                                                                 |
-| `/forgot-password`  | Email input, fires reset email                                                               |
-| `/reset-password`   | Lands here from reset email; sets new password                                               |
-| `/post-auth`        | Reads `sessionStorage.pending_checkout`, fires Stripe checkout if set                        |
-| `/auth/callback`    | Exchanges Supabase auth `code` for session                                                   |
-| `/generate`         | Prompt input + horizontal outfit carousel                                                    |
-| `/try-ons`          | Virtual try-on gallery                                                                       |
-| `/saved`            | Saved outfits grid                                                                           |
-| `/history`          | Session history with expanded card view (4-col grid)                                         |
-| `/profile`          | Account (email change), avatar upload, body details, country & currency                      |
-| `/billing`          | Plan, usage meters, upgrade flow, manage subscription                                        |
+### Core / user-facing
 
-### Key shared components
+| Function | Method | Purpose |
+|---|---|---|
+| `generate` | POST | Full outfit generation pipeline (sync, ~5-30s) |
+| `try-on` | POST | Virtual try-on, **synchronous** — web primary, native NOT recommended (timeout risk) |
+| `try-on-async` | POST | **Async** try-on for native — returns `job_id` in <1s, native subscribes to `try_on_jobs` row via Realtime |
+| `save-outfit` | POST / DELETE | Save / unsave an outfit |
+| `profile` | GET / PATCH / POST | Fetch / update / upload-avatar |
+| `get-usage` | GET | Plan + limits + current-period usage |
 
-| Component        | Purpose                                                                                              |
-|------------------|------------------------------------------------------------------------------------------------------|
-| `TopBar`         | Fixed-position top nav (`position: fixed top-0 z-30`)                                                |
-| `PromptInput`    | Prompt textarea with submit                                                                          |
-| `FilterBar`      | Budget slider, gender selector, brand filter                                                         |
-| `OutfitCarousel` | Horizontal-scroll carousel of outfit cards with progressive preview loading                          |
-| `OutfitCard`     | Preview-first card. Wheel inside the card cycles images (with boundary passthrough on grid pages, locked on carousel) |
-| `TryOnModal`     | Avatar selection + garment picker + angle controls + result display                                  |
-| `ProfileForm`    | Account section (change email), avatar upload, body details, location/currency                       |
-| `UpgradeBanner`  | Inline upgrade prompt on limit/feature errors                                                        |
+### Billing
 
-### Design system
+| Function | Method | Purpose |
+|---|---|---|
+| `create-checkout-session` | POST | Stripe Checkout URL (web only) |
+| `create-portal-session` | POST | Stripe Customer Portal URL (web only) |
+| `stripe-webhook` | POST | Stripe events (signature-verified, no JWT) |
+| `apple-subscription-verify` | POST | iOS calls after StoreKit 2 purchase — verifies signed transaction |
+| `apple-webhook` | POST | App Store Server Notifications V2 (JWS-verified, no JWT) |
 
-- **No rounded corners** — sharp, editorial aesthetic across the auth surface and the rest of the app.
-- **Tailwind tokens:** `near-black`, `ink`, `muted-slate`, `stone`, `canvas`, `hairline`, `coral`, `deep-green`, `action-blue`.
-- **Typography:** `font-display` (Space Grotesk) for headings, `font-sans` (Inter) for body, `font-mono` (JetBrains Mono) for small labels.
+### Public / share
 
----
+| Function | Method | Purpose |
+|---|---|---|
+| `get-outfit-preview` | GET | Public outfit data by UUID — used by marketing share page + native Universal/App Links (no JWT) |
 
-## 10. User Flows
+Full request/response shapes, error codes, and code samples: [BACKEND.md §6](BACKEND.md).
 
-### 10.1 Sign up → confirm → first session
+### Shared helpers (`_shared/`)
 
-```
-/signup → supabase.auth.signUp({ email, password, options: { emailRedirectTo } })
-  ↓
-"Check your email" screen
-  ↓ (user clicks confirm in email)
-/auth/callback?code=... → exchangeCodeForSession
-  ↓
-/post-auth — checks sessionStorage.pending_checkout
-  ↓
-  if pending: redirect to Stripe Checkout
-  else: redirect to /generate
-```
-
-### 10.2 Forgot password
-
-```
-/forgot-password → resetPasswordForEmail(email, { redirectTo: /auth/callback?next=/reset-password })
-  ↓
-"Check your email" screen
-  ↓ (user clicks reset link)
-/auth/callback?code=...&next=/reset-password → exchangeCodeForSession (recovery)
-  ↓
-/reset-password — gated by valid recovery session
-  ↓ (user submits new password)
-updateUser({ password }) → /generate (now authed normally)
-```
-
-### 10.3 Change email (from profile)
-
-```
-/profile → Account section → enters new email → Change email
-  ↓
-updateUser({ email }, { emailRedirectTo: /auth/callback?next=/profile })
-  ↓
-"Confirmation sent to <new email>" toast
-  ↓ (user clicks link in NEW email)
-/auth/callback?code=... → exchangeCodeForSession → /profile shows new email
-```
-
-### 10.4 Generate outfits
-
-```
-User submits prompt → POST /generate
-  ↓
-edge function: limit check → embed → vector search → GPT-4o → save → return outfits
-  ↓
-client kicks off 4 parallel POSTs to /try-on with preview=true, one per outfit
-  ↓
-each preview persists to outfit-previews bucket and writes URL to outfits.preview_image
-  ↓
-cards stream into carousel as previews arrive
-```
-
-### 10.5 Standard try-on (paid feature)
-
-```
-User opens try-on modal on a card → POST /try-on (no preview flag)
-  ↓
-atomic check_and_increment_usage on try_ons
-  ↓
-fetch images → build prompt → Gemini (fallback OpenAI) → return base64
-  ↓
-user picks angle → POST /try-on with angle + reference_image
-```
-
-### 10.6 Subscription upgrade
-
-```
-/billing → user clicks plan card
-  ↓
-POST /create-checkout-session { plan, interval }
-  ↓
-redirect to Stripe Checkout
-  ↓
-Stripe → POST webhook to /stripe-webhook
-  ↓
-DB: subscriptions row updated with plan, period dates from items.data[0]
-  ↓
-redirect back to /billing?success=true → /get-usage reflects new plan + limits
-```
+| File | What's in it |
+|---|---|
+| `auth.ts` | JWT validation, rate limit, body size limits, CORS |
+| `subscription.ts` | Plan helpers, atomic usage check, period-anchor logic |
+| `plans.ts` | `PLAN_LIMITS`, Stripe price ID resolver |
+| `try-on.ts` | AI provider strategy (Gemini → OpenAI fallback), prompt builder, angle definitions |
+| `watermark.ts` | imagescript-based bottom-right mark compositor, fail-open |
+| `apple-iap.ts` | Apple JWS verification, product mapping, App Store Server API client |
+| `currency.ts` | Price conversion, brand shipping scoring |
 
 ---
 
-## 11. Native App Implementation Guide
+## 9. Stickiness & Sharing (platform-wide rules)
 
-### 11.1 SDKs
+Three design decisions all clients must honor consistently:
 
-| Platform | Library                                                                |
-|----------|------------------------------------------------------------------------|
-| iOS      | [`supabase-swift`](https://github.com/supabase/supabase-swift)         |
-| Android  | [`supabase-kt`](https://github.com/supabase-community/supabase-kt)     |
+### a) No "save image" affordance
 
-Both SDKs handle token persistence, refresh, and secure storage. Initialize with `SUPABASE_URL` + `SUPABASE_ANON_KEY`.
+- **Web:** removed Download buttons from try-on lightbox and modal
+- **iOS:** native apps must NOT add UIActivityViewController "Save to Photos" action
+- **Android:** native apps must NOT add a Save to Gallery affordance
 
-### 11.2 Calling edge functions
+OS-level long-press → Save Image still works (can't be prevented without hostile UX). But no client should add its own button.
 
-**Swift:**
-```swift
-let response: GenerateResponse = try await supabase.functions.invoke(
-  "generate",
-  options: .init(body: [
-    "prompt": "casual summer outfit",
-    "filters": ["budget_max": 200, "gender": "mens"]
-  ])
-)
+### b) Share button uses marketing-page URL
+
+When user shares a try-on:
+
+- **All clients:** share `https://railory.io/o/{outfit_id}` (the marketing share page)
+- **NEVER share** `outfit.preview_image` (the raw bucket URL)
+
+This way:
+- Recipient lands on a branded page with "Try Railory free" CTA
+- OpenGraph meta tags make Twitter/iMessage unfurl beautifully
+- The image URL doesn't spread without a path back to the brand
+
+### c) Watermark on every try-on
+
+- Applied **server-side** in the try-on edge function (sync + async)
+- Pure-Deno via `imagescript` library
+- Bottom-right corner, ~10% of width, 45% opacity
+- Fail-open at every step — if watermarking errors, original AI image is returned
+- Clients render the image as-is. No client-side overlay.
+
+---
+
+## 10. Async Job Pattern (for native)
+
+Native clients hit HTTP timeout on the sync `try-on` endpoint (~30s default on iOS URLSession / Android OkHttp). Solution: async pattern.
+
+### Flow
+
+```
+1. Client POST /try-on-async with idempotency_key (UUID)
+   → returns { job_id, status: "pending" } in <1s
+   → credit deducted atomically at this point
+
+2. Client subscribes to public.try_on_jobs row via Realtime
+   OR polls the row every 3-5s
+
+3. Background:
+   - Job marked 'processing'
+   - AI provider call (Gemini → OpenAI fallback)
+   - Watermark applied (fail-open)
+   - Persisted to outfit-previews bucket
+   - Row updated: status='completed', output_url=<url>
+
+4. Client receives update via Realtime → renders image
+   On failure: status='failed', credit auto-refunded
 ```
 
-**Kotlin:**
-```kotlin
-val response = supabase.functions.invoke("generate") {
-  setBody(buildJsonObject {
-    put("prompt", "casual summer outfit")
-    putJsonObject("filters") {
-      put("budget_max", 200)
-      put("gender", "mens")
-    }
-  })
-}.body<GenerateResponse>()
-```
+### Cost protections specific to async
 
-The SDK automatically attaches the `Authorization: Bearer` header.
+| Protection | What it stops |
+|---|---|
+| **Idempotency key** (5-min window) | Double-tap submission, retry storms — same UUID returns existing job |
+| **Max 3 concurrent jobs per user** | Buggy client / malicious actor spamming parallel AI calls |
+| **`reclaim_stuck_jobs()` pg_cron** | Function instance killed mid-AI-call — finds stuck jobs >5min, marks failed, refunds credit |
+| **Atomic credit deduction (row lock)** | Two concurrent requests both squeaking past the limit |
 
-### 11.3 Direct DB reads (Postgres via Supabase REST/Realtime)
+### Sync vs async per platform
 
-Read directly (subject to RLS — users can only see their own rows):
+| Endpoint | Web | iOS | Android |
+|---|---|---|---|
+| `try-on` (sync) | ✅ primary | not recommended | not recommended |
+| `try-on-async` (async) | optional | ✅ primary | ✅ primary |
+| `generate` (sync) | ✅ primary | ✅ (typically <30s) | ✅ (typically <30s) |
+| `generate-async` (Phase 2) | — | future | future |
 
-- `outfit_sessions` — list past sessions
-- `outfits` + `outfit_items` joined with `products` — load a session
-- `saved_outfits` joined with `outfits` → `outfit_items` → `products` — saved looks list
+---
 
-Write only via edge functions (never direct insert/update on these tables).
+## 11. Cost Protection Layers
 
-### 11.4 Image handling
+Defense in depth — multiple layers prevent runaway API costs from abuse:
 
-| Image type           | Source                                              | Caching       |
-|----------------------|-----------------------------------------------------|---------------|
-| Product images       | `products.images[]` — public URLs                   | Cache forever |
-| Predefined avatar    | `avatars/{id}.png` — public URL                     | Cache forever |
-| Custom avatar        | Signed URL from `profile` GET (1hr expiry)          | Cache 1hr; re-fetch profile to refresh |
-| Outfit preview       | `outfits.preview_image` — public URL, persisted     | Cache forever |
-| Try-on result (standard) | Base64 data URL                                 | Decode + display; not persisted |
+| Layer | Where | What it catches |
+|---|---|---|
+| Plan-based monthly caps | `check_and_increment_usage` (atomic SQL) | User can't exceed their plan's monthly limit |
+| Per-user rate limits | `_shared/auth.ts` (in-memory per isolate) | Burst spam: 6/min generate, 10/min try-on, etc. |
+| Idempotency keys | `try-on-async` | Double-tap from same user action |
+| Max concurrent jobs | `try-on-async` | Retry storms |
+| Atomic refund on AI failure | All consuming endpoints | User doesn't lose credit if Gemini/OpenAI fails |
+| Stuck job reclaimer | `reclaim_stuck_jobs()` via pg_cron | Function killed mid-AI-call — refund + mark failed |
+| Body size limits | `_shared/auth.ts` (50KB JSON, 1000 char prompt, 6 garments) | Oversized payloads |
+| Disposable email block | `lib/auth-validation.ts` | Free-tier farming via temp emails |
+| Captcha on signup | env-gated (Cloudflare Turnstile) | Bot signup farming |
+| Stripe webhook signature | `stripe-webhook` | Forged subscription updates |
+| Apple JWS verification | `apple-subscription-verify` + `apple-webhook` | Forged StoreKit transactions / notifications |
+| Apple appAccountToken cross-check | `apple-subscription-verify` | User A claiming User B's purchase |
+| Email verification required | Supabase Auth setting | Accounts without verified ownership |
+| HaveIBeenPwned password check | Supabase Auth setting | Compromised-password reuse |
 
-### 11.5 Deep links
-
-`products.deep_link_ios` and `deep_link_android` open the product in the retailer's native app. Fall back to `products.product_url` for web. Both columns may be NULL — check before use.
-
-### 11.6 Push notifications
-
-Not implemented in v1. Recommended trigger candidates for future:
-
-- Subscription renewal upcoming (Stripe webhook → push)
-- "Limit almost reached" reminder
-- New seasonal collection drop
-
-Implementation would route through APNs/FCM with tokens stored on a new `device_tokens` table.
-
-### 11.7 Offline behavior
-
-| Feature              | Offline-capable? | Notes                                                    |
-|----------------------|------------------|----------------------------------------------------------|
-| Browse saved outfits | Yes              | Cache `saved_outfits` + product data                     |
-| View profile         | Yes              | Cache last-fetched profile                               |
-| Generate             | No               | Requires server-side AI                                  |
-| Try-on               | No               | Requires server-side AI                                  |
-| Sign up / log in     | No               | Auth network call                                        |
-
-Use Supabase Realtime if you want live updates to `outfit_sessions` / `saved_outfits` when the user has the app open.
-
-### 11.8 Suggested screens
-
-| Screen          | Notes                                                                                  |
-|-----------------|----------------------------------------------------------------------------------------|
-| Splash + Onboarding | Sign-up / sign-in choice. After auth, check `/get-usage` for plan state.            |
-| Generate        | Prompt input + filter chips + result carousel (mirrors web `/generate`)                |
-| Outfit detail   | Full preview, AI reasoning, item list with deep link buttons                           |
-| Try-on          | Avatar picker + angle controls (gate angles by plan; gate custom avatar by Pro)        |
-| Saved           | Grid of saved outfits                                                                  |
-| History         | Sessions list, expandable to grid                                                      |
-| Profile         | Body details, avatar upload, country/currency, change email                            |
-| Billing         | Plan + usage meters + upgrade CTA (open Stripe Customer Portal via web)                |
+Most protections are server-side and apply identically across clients.
 
 ---
 
 ## 12. Security Model
 
-### Edge function auth
+### Authentication
 
-1. Supabase gateway validates the JWT (`verify_jwt: true`) before the function runs — invalid/expired tokens get rejected with 401 by the gateway, never reach our code.
-2. `_shared/auth.ts` calls `supabase.auth.getUser(token)` to get the verified user.
-3. Service role client is used inside functions for privileged ops. Never exposed to the client.
+- Supabase gateway enforces `verify_jwt: true` on all auth-required endpoints — invalid tokens get 401'd before reaching our code
+- `_shared/auth.ts` extracts the verified user via `supabase.auth.getUser(token)`
+- Service-role client used inside edge functions for privileged DB/storage operations — never exposed to clients
 
-### Row-level security
+### RLS (Row-Level Security)
 
-RLS enabled on all user-scoped tables. Policies:
+Enabled on all user-scoped tables. Users can only `SELECT/INSERT/UPDATE/DELETE` rows they own. Direct DB queries (via Supabase JS / Swift / Kotlin SDK) respect this automatically.
 
-- Users read/write their own `subscriptions`, `usage`, `outfit_sessions`, `outfits`, `outfit_items`, `saved_outfits`.
-- Products, brands, categories: readable by all authenticated users.
+### What clients never see
 
-Service role bypasses RLS, used by edge functions for cross-user ops (e.g. webhook updating arbitrary subscriptions).
-
-### Storage policies
-
-- `user-avatars` — private; folder-per-user policies + signed URLs for read.
-- `avatars`, `product-images`, `outfit-previews`, `brand` — public.
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `OPENAI_API_KEY`, `GEMINI_API_KEY`
+- `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`
+- `APPLE_APP_STORE_PRIVATE_KEY`, `APPLE_IAP_SHARED_SECRET`
+- Raw product embeddings
+- Other users' data
 
 ### Open redirect defense
 
@@ -880,127 +447,156 @@ Service role bypasses RLS, used by edge functions for cross-user ops (e.g. webho
 
 ### CORS
 
-Edge functions check `Origin` against `ALLOWED_ORIGINS` (currently `https://app.railory.io,https://railory.io`). For native apps, the Origin header is typically absent — handle in the CORS helper if needed for mobile.
+Edge functions check `Origin` against `ALLOWED_ORIGINS` (set to `https://app.railory.io,https://railory.io`). Native apps don't send Origin and bypass CORS by design — JWT auth is the actual gate.
 
-### What the client never sees
+### App Store / Play Store rules
 
-- `SUPABASE_SERVICE_ROLE_KEY`
-- `OPENAI_API_KEY`, `GEMINI_API_KEY`
-- `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`
-- Raw product embeddings
+- iOS app must NOT mention Stripe, external payment links, or web subscription
+- Android more permissive but still recommend in-app billing as primary
+- Both: "Restore Purchases" must be visible (Apple) / supported (Google)
 
 ---
 
-## 13. Domain & Deployment
+## 13. Deployment Topology
 
-### Domains
+### Domains + Vercel projects
 
-| Surface  | Domain          | Project                                         |
-|----------|-----------------|-------------------------------------------------|
-| Marketing| `railory.io`    | Vercel project: `railory-marketing`             |
-| App      | `app.railory.io`| Vercel project: `railory-application`           |
-| Backend  | `<ref>.supabase.co` | Supabase project: `rkbljmsalughhsuspwoi`    |
+| Domain | Vercel project | Repo |
+|---|---|---|
+| `railory.io` | `railory-marketing` | `railory-marketing` |
+| `app.railory.io` | `railory-application` | `railory-application` (this repo) |
+
+### Backend
+
+- **Supabase project:** `rkbljmsalughhsuspwoi`
+- **Region:** Oceania (Sydney)
+- **Plan:** Pro (recommended for production — 400s edge function timeout, daily backups, no project pausing)
 
 ### DNS (Namecheap)
 
-| Type  | Host  | Value                            |
-|-------|-------|----------------------------------|
-| A     | `@`   | `76.76.21.21` (Vercel apex)      |
-| CNAME | `www` | `cname.vercel-dns.com`           |
-| CNAME | `app` | `cname.vercel-dns.com`           |
+| Type | Host | Value |
+|---|---|---|
+| A | `@` | `76.76.21.21` (Vercel apex) |
+| CNAME | `www` | `cname.vercel-dns.com` |
+| CNAME | `app` | `cname.vercel-dns.com` |
 
-### Supabase auth URL config
+### Universal Links / App Links (Phase 2)
 
-- **Site URL:** `https://app.railory.io`
-- **Redirect URLs:**
-  - `https://app.railory.io/auth/callback`
-  - `https://app.railory.io/post-auth`
-  - `http://localhost:3000/auth/callback` (dev)
+Files to add to `railory-marketing` repo's `public/.well-known/`:
+- `apple-app-site-association` (iOS)
+- `assetlinks.json` (Android)
 
-### Cookie scope
+So shared `/o/{id}` URLs open inside the native app when installed.
 
-Supabase auth cookies are scoped to `app.railory.io`. They are **not** sent to `railory.io`. The marketing site cannot tell whether a user is logged in. Pricing CTAs always go to `app.railory.io/signup?plan=...` and the app routes appropriately if the user is already signed in.
+### Edge function secrets (current count: 16)
 
----
-
-## 14. Allowed Values Reference
-
-Useful for building form UIs.
-
-| Field                | Options                                                                                      |
-|----------------------|----------------------------------------------------------------------------------------------|
-| Body type            | `slim`, `athletic`, `medium`, `curvy`, `plus`                                                |
-| Gender presentation  | `female`, `male`, `androgynous`                                                              |
-| Skin tone            | `light`, `fair`, `medium`, `olive`, `brown`, `dark`                                          |
-| Hair length          | `bald`, `short`, `medium`, `long`                                                            |
-| Hair colour          | Free text                                                                                    |
-| Age range            | `18-24`, `25-34`, `35-44`, `45-54`, `55+`                                                    |
-| Outfit gender filter | `mens`, `womens`, `unisex`                                                                   |
-| Outfit item roles    | `top`, `bottom`, `shoe`, `jacket`, `boots`                                                   |
-| Try-on angles        | `front`, `back`, `left-side`, `right-side`, `three-quarter`, `close-up-top`, `close-up-bottom` |
-| Country (ISO 3166-1) | `US`, `GB`, `PK`, `AE`, `SA`, `IN`, `DE`, `FR`, `CA`, `AU`, `TR`                             |
-| Currency (ISO 4217)  | `USD`, `GBP`, `EUR`, `PKR`, `AED`, `SAR`, `INR`, `CAD`, `AUD`, `TRY`                         |
-
----
-
-## 15. API Quick Reference
-
-| Action                 | Function                | Method  | Key fields                                                                             |
-|------------------------|-------------------------|---------|----------------------------------------------------------------------------------------|
-| Generate outfits       | `generate`              | POST    | `prompt`, `filters`, `session_id?`                                                     |
-| Save outfit            | `save-outfit`           | POST    | `outfit_id`                                                                            |
-| Unsave outfit          | `save-outfit`           | DELETE  | `?saved_id=uuid`                                                                       |
-| Try on (standard)      | `try-on`                | POST    | `model_image`, `garments[]`, `angle?`, `reference_image?`, `body_context?`             |
-| Try on (preview)       | `try-on`                | POST    | `model_image`, `garments[]`, `preview: true`, `outfit_id`, `pose?`                     |
-| Get profile            | `profile`               | GET     | —                                                                                      |
-| Update profile         | `profile`               | PATCH   | Body detail fields                                                                     |
-| Upload avatar (Pro)    | `profile`               | POST    | `avatar` (multipart)                                                                   |
-| Get usage              | `get-usage`             | GET     | —                                                                                      |
-| Start checkout         | `create-checkout-session`| POST   | `plan`, `interval`                                                                     |
-| Open billing portal    | `create-portal-session` | POST    | —                                                                                      |
-
-### Approx API cost per call (server-side)
-
-| Call                      | Cost          |
-|---------------------------|---------------|
-| Generate (embed + GPT-4o) | ~$0.03        |
-| Try-on preview (Gemini)   | ~$0.002       |
-| Try-on preview (OpenAI fallback, 1024×1024 low) | ~$0.011 |
-| Full generation (incl. 4 previews) | ~$0.04 – $0.08 |
-
----
-
-## 16. Useful SQL Queries (for debugging)
-
-```sql
--- Subscription for a user
-select * from public.subscriptions where user_id = '<uuid>';
-
--- Current period usage for a user
-select * from public.usage
-where user_id = '<uuid>'
-order by period desc
-limit 5;
-
--- All saved outfits with product items
-select s.id, s.saved_at, o.ai_reasoning, p.name, p.price, p.currency
-from public.saved_outfits s
-join public.outfits o on o.id = s.outfit_id
-join public.outfit_items oi on oi.outfit_id = o.id
-join public.products p on p.id = oi.product_id
-where s.user_id = '<uuid>'
-order by s.saved_at desc;
-
--- Recently active sessions
-select s.id, s.initial_prompt, count(o.id) as outfit_count, s.created_at
-from public.outfit_sessions s
-left join public.outfits o on o.session_id = s.id
-where s.user_id = '<uuid>'
-group by s.id
-order by s.created_at desc
-limit 20;
-
--- Fast-forward usage to test limits
-update public.usage set generations = 50
-where user_id = '<uuid>' and period = '2026-05-24';
 ```
+Supabase auto-set:
+  SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY
+
+AI providers:
+  OPENAI_API_KEY, GEMINI_API_KEY
+
+Stripe (web subscriptions):
+  STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
+  STRIPE_PRICE_STARTER_MONTHLY, STRIPE_PRICE_STARTER_YEARLY
+  STRIPE_PRICE_PRO_MONTHLY, STRIPE_PRICE_PRO_YEARLY
+  APP_URL, ALLOWED_ORIGINS
+
+Apple IAP (iOS subscriptions, set when iOS launches):
+  APPLE_BUNDLE_ID, APPLE_TEAM_ID, APPLE_IAP_SHARED_SECRET
+  APPLE_APP_STORE_KEY_ID, APPLE_APP_STORE_ISSUER_ID
+  APPLE_APP_STORE_PRIVATE_KEY
+```
+
+---
+
+## 14. Native App Recommendations (high-level)
+
+For full code samples + endpoint contracts: [BACKEND.md §11–§13](BACKEND.md). For Apple-specific setup: [APPLE_IAP_SETUP.md](APPLE_IAP_SETUP.md).
+
+### iOS (Swift / SwiftUI)
+
+Recommended architecture:
+- **State management:** Observable + SwiftUI environment
+- **HTTP:** `supabase-swift` SDK — handles JWT refresh, Realtime, Storage, Functions
+- **Subscriptions:** StoreKit 2 with `appAccountToken(userIdUUID)` for fraud prevention
+- **Async try-on:** `try-on-async` + Realtime subscription on `try_on_jobs` table
+- **Deep linking:** Universal Links for `railory.io/o/{id}` + custom URL scheme `railory://` for auth callbacks
+- **Image caching:** Kingfisher or NukeUI with disk cache
+- **Auth:** SwiftUI app receives `Session` from Supabase SDK, persists to Keychain automatically
+
+### Android (Kotlin / Compose)
+
+Recommended architecture:
+- **State management:** ViewModel + StateFlow
+- **HTTP:** `supabase-kt` SDK — same capabilities as Swift counterpart
+- **Subscriptions:** Google Play Billing Library 7+ (Phase 2 — webhook scaffold pending)
+- **Async try-on:** same pattern as iOS
+- **Deep linking:** App Links via intent-filter with `autoVerify="true"`
+- **Image caching:** Coil with disk cache
+- **Auth:** Supabase SDK persists to EncryptedSharedPreferences
+
+### Push notifications (Phase 2 for both)
+
+Not implemented in v1. When added:
+- New `device_tokens(user_id, platform, token, created_at)` table
+- Trigger candidates: subscription renewing soon, "near limit" reminder, new outfit collection, friend's outfit shared with you
+- iOS: APNs via Apple Push Notification service
+- Android: FCM (Firebase Cloud Messaging)
+
+---
+
+## 15. Documentation Map
+
+| Want to... | Read |
+|---|---|
+| Understand the architecture (you are here) | [SYSTEM.md](SYSTEM.md) |
+| Implement against the API — exact types, examples, error codes | [BACKEND.md](BACKEND.md) |
+| Set up Apple In-App Purchase | [APPLE_IAP_SETUP.md](APPLE_IAP_SETUP.md) |
+| Harden the platform before launch (dashboard checklist) | [SECURITY_CHECKLIST.md](SECURITY_CHECKLIST.md) |
+| Deploy / re-deploy / DNS | [DEPLOYMENT.md](DEPLOYMENT.md) |
+| Set up local dev | [README.md](README.md) |
+| Add the marketing share page | [marketing-share-page/README.md](marketing-share-page/README.md) |
+| Look at an SQL migration | `supabase/migrations/*.sql` |
+
+---
+
+## 16. Allowed Values Quick Reference
+
+For form pickers — same across all clients.
+
+| Field | Values |
+|---|---|
+| `body_type` | `slim` `athletic` `medium` `curvy` `plus` |
+| `gender_presentation` | `female` `male` `androgynous` |
+| `skin_tone` | `light` `fair` `medium` `olive` `brown` `dark` |
+| `hair_length` | `bald` `short` `medium` `long` |
+| `age_range` | `18-24` `25-34` `35-44` `45-54` `55+` |
+| Outfit gender filter | `mens` `womens` `unisex` |
+| Outfit item `role` | `top` `bottom` `shoe` `jacket` `boots` |
+| Try-on `angle` | `front` `back` `left-side` `right-side` `three-quarter` `close-up-top` `close-up-bottom` |
+| Country | ISO 3166-1 alpha-2 (`US` `GB` `PK` `AE` `SA` `IN` `DE` `FR` `CA` `AU` `TR`) |
+| Currency | ISO 4217 (`USD` `GBP` `EUR` `PKR` `AED` `SAR` `INR` `CAD` `AUD` `TRY`) |
+| Subscription source | `free` `stripe` `apple` `google` |
+| Subscription status | `active` `past_due` `canceled` `trialing` |
+
+---
+
+## 17. Status as of this writing
+
+| Surface | Status |
+|---|---|
+| Marketing site live at `railory.io` | ✅ |
+| Web app live at `app.railory.io` | ✅ |
+| Stripe live mode with all 4 plans wired | ✅ |
+| Full billing test suite (sub, upgrade, downgrade, cancel) | ✅ verified |
+| Server-side watermark on try-ons | ✅ |
+| Marketing share page `/o/{id}` | ✅ deployed to railory.io |
+| Async try-on endpoint for native | ✅ deployed |
+| Apple IAP backend scaffold | ✅ deployed, awaiting App Store Connect config |
+| Pre-launch dashboard hardening (captcha, HIBP, etc.) | ⬜ pending in Supabase dashboard |
+| iOS app | ⬜ in development |
+| Android app | ⬜ in development |
+| Google Play Billing backend | ⬜ Phase 2 |
+| Push notifications | ⬜ Phase 2 |
