@@ -471,8 +471,10 @@ All at `https://rkbljmsalughhsuspwoi.supabase.co/functions/v1/{name}`:
 | `get-usage`               | GET    | ✅            | Plan, limits, current usage |
 | `create-checkout-session` | POST   | ✅            | Returns Stripe Checkout URL |
 | `create-portal-session`   | POST   | ✅            | Returns Stripe Customer Portal URL |
-| `stripe-webhook`          | POST   | ❌ (signature-verified) | Receives Stripe events |
+| `stripe-webhook`          | POST   | ❌ (signature-verified) | Receives Stripe events (web subscriptions) |
 | `get-outfit-preview`      | GET    | ❌ (public)   | Returns shareable outfit data by ID — used by marketing share page + native Universal/App Link handlers |
+| `apple-subscription-verify` | POST | ✅            | iOS calls this after StoreKit purchase — verifies the signed transaction, upserts subscription. See [APPLE_IAP_SETUP.md](APPLE_IAP_SETUP.md) |
+| `apple-webhook`           | POST   | ❌ (JWS-verified) | App Store Server Notifications V2 — renewals, cancels, refunds for iOS subscriptions |
 
 ---
 
