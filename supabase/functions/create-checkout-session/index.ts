@@ -50,8 +50,23 @@ Deno.serve(async (req: Request) => {
     const db = getServiceClient();
     const sub = await getUserSubscription(db, user.id);
 
-    // Reuse existing Stripe customer or create one
+    // Reuse existing Stripe customer or create one.
+    //
+    // Defensive: if the DB row has no stripe_customer_id (e.g. it was
+    // wiped during testing, or a brand-new user), check Stripe for an
+    // existing customer with this email BEFORE creating a new one.
+    // Without this, repeated DB resets would orphan Stripe customers.
     let customerId = sub.stripe_customer_id;
+
+    if (!customerId && user.email) {
+      const existing = await stripe.customers.list({
+        email: user.email,
+        limit: 1,
+      });
+      if (existing.data.length > 0) {
+        customerId = existing.data[0].id;
+      }
+    }
 
     if (!customerId) {
       const customer = await stripe.customers.create({
@@ -59,13 +74,16 @@ Deno.serve(async (req: Request) => {
         metadata: { supabase_user_id: user.id },
       });
       customerId = customer.id;
-
-      // Persist the customer ID immediately
-      await db
-        .from("subscriptions")
-        .update({ stripe_customer_id: customerId, updated_at: new Date().toISOString() })
-        .eq("user_id", user.id);
     }
+
+    // Persist the customer ID immediately (idempotent if already set)
+    await db
+      .from("subscriptions")
+      .update({
+        stripe_customer_id: customerId,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("user_id", user.id);
 
     // Build success/cancel URLs
     const origin =
