@@ -150,38 +150,59 @@ Deno.serve(async (req: Request) => {
       return errorResponse(result.error, 502);
     }
 
-    let outputUrl = result.url;
-
-    // Decode the AI result + apply the Railory watermark. The watermarked
-    // bytes are used for both the bucket upload (preview / persisted try-ons)
-    // and the base64 data URL returned to standard-mode callers.
+    // ── Post-generation pipeline (watermark + persist) ──
     //
-    // applyWatermark fails open — if anything goes wrong (network, decode
-    // error), it returns the original bytes so a watermark glitch can never
-    // break a try-on.
-    let watermarkedBytes: Uint8Array | null = null;
+    // CRITICAL INVARIANT: the user must always get a valid output_url.
+    // The watermark and persistence steps are "extras" — if any of them
+    // fail, we fall through with the AI's original image so the user
+    // never sees a broken response because of our branding/storage code.
+    //
+    // Each sub-step is wrapped in its own try/catch so failures stay
+    // contained.
+
+    let outputUrl = result.url;
+    let imageBytes: Uint8Array | null = null;
     let mimeType = "image/png";
-    const match = result.url.match(/^data:([^;]+);base64,(.+)$/);
-    if (match) {
-      mimeType = match[1];
-      const binaryStr = atob(match[2]);
-      const originalBytes = new Uint8Array(binaryStr.length);
-      for (let i = 0; i < binaryStr.length; i++) {
-        originalBytes[i] = binaryStr.charCodeAt(i);
-      }
 
-      watermarkedBytes = await applyWatermark(originalBytes);
-
-      // Re-encode as data URL for callers that don't persist (no outfit_id)
-      let binary = "";
-      for (let i = 0; i < watermarkedBytes.length; i++) {
-        binary += String.fromCharCode(watermarkedBytes[i]);
+    // Step 1 — decode the AI's base64 result into raw bytes.
+    // If this fails, we keep result.url as the response (no watermark,
+    // no persist, but a working image).
+    try {
+      const match = result.url.match(/^data:([^;]+);base64,(.+)$/);
+      if (match) {
+        mimeType = match[1];
+        const binaryStr = atob(match[2]);
+        imageBytes = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) {
+          imageBytes[i] = binaryStr.charCodeAt(i);
+        }
       }
-      outputUrl = `data:${mimeType};base64,${btoa(binary)}`;
+    } catch (err) {
+      console.warn("[try-on] Decode of AI result failed:", err);
     }
 
-    // Persist to storage whenever we have an outfit_id (previews + user try-ons)
-    if (outfit_id && watermarkedBytes) {
+    // Step 2 — apply watermark. applyWatermark is already fail-open
+    // (returns the original bytes on any error), so this never throws.
+    if (imageBytes) {
+      imageBytes = await applyWatermark(imageBytes);
+
+      // Step 3 — re-encode as data URL so callers without an outfit_id
+      // get the watermarked version. If encoding fails (shouldn't),
+      // outputUrl stays as the AI's raw data URL.
+      try {
+        let binary = "";
+        for (let i = 0; i < imageBytes.length; i++) {
+          binary += String.fromCharCode(imageBytes[i]);
+        }
+        outputUrl = `data:${mimeType};base64,${btoa(binary)}`;
+      } catch (err) {
+        console.warn("[try-on] Re-encode of watermarked image failed:", err);
+      }
+    }
+
+    // Step 4 — persist to storage when an outfit_id is provided.
+    // Wrapped in its own try/catch so upload errors don't propagate.
+    if (outfit_id && imageBytes) {
       try {
         const ext = mimeType.includes("png") ? "png" : "jpg";
         const suffix = angle
@@ -193,7 +214,7 @@ Deno.serve(async (req: Request) => {
 
         const { error: uploadErr } = await db.storage
           .from("outfit-previews")
-          .upload(filePath, watermarkedBytes.buffer, {
+          .upload(filePath, imageBytes.buffer, {
             contentType: mimeType,
             upsert: true,
           });
