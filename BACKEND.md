@@ -14,6 +14,7 @@ SUPABASE_URL           = https://rkbljmsalughhsuspwoi.supabase.co
 EDGE_FUNCTIONS_URL     = https://rkbljmsalughhsuspwoi.supabase.co/functions/v1
 WEB_APP_URL            = https://app.railory.io
 MARKETING_URL          = https://railory.io
+SHARE_URL_PATTERN      = https://railory.io/o/{outfit_id}     ← public share page
 STRIPE_API_VERSION     = 2025-04-30.basil
 ```
 
@@ -407,7 +408,7 @@ match_products(
 | `product-images`   | ✅      | varies                                    | Product catalog images |
 | `outfit-previews`  | ✅      | `{user_id}/{outfit_id}.png`               | Persisted try-on previews |
 | `generated-outfits`| ❌      | (reserved)                                | Future use |
-| `brand`            | ✅      | `railory_logo_black.png`, etc.             | Brand assets for email templates |
+| `brand`            | ✅      | `railory_logo_black.png`, `railory_watermark.png` | Brand assets — email logo + try-on watermark mark |
 
 ### Public URL pattern
 
@@ -420,6 +421,7 @@ https://rkbljmsalughhsuspwoi.supabase.co/storage/v1/object/public/{bucket}/{path
 Predefined avatar:    .../public/avatars/f-1.png
 Outfit preview:       .../public/outfit-previews/{user_id}/{outfit_id}.png
 Brand logo:           .../public/brand/railory_logo_black.png
+Try-on watermark:     .../public/brand/railory_watermark.png
 ```
 
 ### `user-avatars` (private) RLS
@@ -469,6 +471,7 @@ All at `https://rkbljmsalughhsuspwoi.supabase.co/functions/v1/{name}`:
 | `create-checkout-session` | POST   | ✅            | Returns Stripe Checkout URL |
 | `create-portal-session`   | POST   | ✅            | Returns Stripe Customer Portal URL |
 | `stripe-webhook`          | POST   | ❌ (signature-verified) | Receives Stripe events |
+| `get-outfit-preview`      | GET    | ❌ (public)   | Returns shareable outfit data by ID — used by marketing share page + native Universal/App Link handlers |
 
 ---
 
@@ -672,6 +675,14 @@ Also writes the URL to `outfits.preview_image` so future loads don't regenerate.
 
 **Cost (server-side):** ~$0.002 (Gemini) or ~$0.011 (OpenAI fallback). Always 1024×1024 low quality.
 
+**Watermark (always-on, server-side):**
+
+Every image returned by `try-on` — both standard and preview mode — has the Railory mark composited onto the bottom-right corner (~10% of width, 45% opacity) before being returned or persisted. This happens inside the edge function via `_shared/watermark.ts` using pure-Deno `imagescript`.
+
+Native clients **do not** overlay anything — the image arrives already watermarked. Just render `output_url` as-is.
+
+The pipeline is **fail-open at every layer**: if watermarking errors out (network blip fetching the mark, decode failure, etc.), the original AI image is returned unchanged. The user always gets a working image — watermark is an "extra" for stickiness, never a gate on the response.
+
 ### 6.4 `profile`
 
 **GET — Fetch profile:**
@@ -773,6 +784,87 @@ Not called by clients. Receives Stripe events. Handles:
 - `invoice.paid` → renew period dates
 - `customer.subscription.updated` → plan/status change
 - `customer.subscription.deleted` → downgrade to free
+
+### 6.9 `get-outfit-preview` — GET
+
+**Public — no JWT required.** Returns shareable outfit data by ID for the marketing-side share page (`https://railory.io/o/{id}`) and any native client implementing Universal Links / App Links.
+
+**Security model:** UUIDs are 128-bit — guessing is computationally infeasible. Same pattern as Google Docs link-sharing. No user identifiers are ever returned in the response.
+
+**Request:**
+```
+GET /functions/v1/get-outfit-preview?id={outfit_uuid}
+```
+
+No body. No `Authorization` header needed.
+
+**Response (200):**
+```ts
+interface OutfitPreviewResponse {
+  id: string;
+  preview_image: string;              // watermarked, public storage URL
+  ai_reasoning: string | null;
+  total_price: number | null;
+  currency: string;                   // e.g. "USD"
+  prompt: string | null;              // session.initial_prompt
+  created_at: string;                 // ISO timestamp
+  items: Array<{
+    role: string;
+    product: {
+      id: string;
+      name: string;
+      brand_name: string;
+      category_name: string;
+      price: number;
+      currency: string;
+      images: string[];
+      colours: string[];
+      product_url: string | null;
+    };
+  }>;
+}
+```
+
+**Sample response:**
+```json
+{
+  "id": "cecf1f1e-6666-4964-bb58-d467004862b2",
+  "preview_image": "https://rkbljmsalughhsuspwoi.supabase.co/storage/v1/object/public/outfit-previews/abc/cecf.png",
+  "ai_reasoning": "A relaxed summer look with linen tones...",
+  "total_price": 149.97,
+  "currency": "USD",
+  "prompt": "smart casual outfit for a wine bar",
+  "created_at": "2026-05-31T00:35:07Z",
+  "items": [
+    {
+      "role": "top",
+      "product": {
+        "id": "...", "name": "Linen Shirt", "brand_name": "Zara",
+        "category_name": "Tops", "price": 35.99, "currency": "USD",
+        "images": ["https://..."], "colours": ["White"],
+        "product_url": "https://..."
+      }
+    }
+  ]
+}
+```
+
+**Errors:**
+
+| Status | Body                                       | When                                                  |
+|--------|--------------------------------------------|-------------------------------------------------------|
+| 400    | `{ "error": "Missing required query param: id" }` | `?id=` not provided                            |
+| 400    | `{ "error": "Invalid outfit id" }`         | Not a valid UUID format                              |
+| 404    | `{ "error": "Outfit not found" }`          | UUID doesn't match any outfit                        |
+| 404    | `{ "error": "Outfit preview not available" }` | Outfit exists but `preview_image` is null         |
+
+**What's NOT returned:** `user_id`, `session_id`. Privacy-by-design — recipients of shared links never learn who created the outfit.
+
+**Use cases:**
+- Marketing repo's `app/o/[id]/page.tsx` server-side render (already deployed)
+- Native iOS Universal Link handler — fetch outfit data, render in native screen
+- Native Android App Link handler — same
+- Third-party integrations / API consumers (future)
 
 ---
 
@@ -1187,17 +1279,21 @@ Margins documented in PRICING analysis: Starter ~80% at realistic usage, Pro ~76
 ## 15. Quick reference card
 
 ```
-EDGE FUNCTIONS
+EDGE FUNCTIONS (auth required)
   POST   /functions/v1/generate                       → outfit gen
   POST   /functions/v1/save-outfit                    → save (body)
   DELETE /functions/v1/save-outfit?saved_id=...       → unsave
-  POST   /functions/v1/try-on                         → virtual try-on
+  POST   /functions/v1/try-on                         → virtual try-on (server-side watermarked)
   GET    /functions/v1/profile                        → fetch profile
   PATCH  /functions/v1/profile                        → update body details
   POST   /functions/v1/profile                        → upload avatar (Pro)
   GET    /functions/v1/get-usage                      → plan + usage
   POST   /functions/v1/create-checkout-session        → Stripe checkout URL
   POST   /functions/v1/create-portal-session          → Stripe portal URL
+
+EDGE FUNCTIONS (public, no JWT)
+  GET    /functions/v1/get-outfit-preview?id={uuid}   → public share-page data
+  POST   /functions/v1/stripe-webhook                 → Stripe events (signature-verified)
 
 DIRECT DB (RLS-protected)
   SELECT public.outfit_sessions
@@ -1211,6 +1307,7 @@ STORAGE (public)
   /storage/v1/object/public/avatars/{id}.png
   /storage/v1/object/public/outfit-previews/{user_id}/{outfit_id}.png
   /storage/v1/object/public/brand/railory_logo_black.png
+  /storage/v1/object/public/brand/railory_watermark.png  ← server-side try-on mark
 
 STORAGE (private, signed URL via /profile)
   user-avatars/{user_id}/avatar.{ext}
@@ -1219,6 +1316,17 @@ AUTH SCHEMES
   https://app.railory.io/auth/callback   (web)
   railory://auth-callback                (native — configure scheme)
   railory://reset-password               (native — configure scheme)
+
+SHARE PAGE (rendered by marketing repo)
+  https://railory.io/o/{outfit_id}       ← all Share buttons must use this URL
+                                           (never raw image URL — stickiness)
+
+STICKINESS RULES (native must mirror)
+  - DO NOT add 'Save to Photos' / 'Save to Gallery' affordances
+  - Share button MUST share https://railory.io/o/{outfit_id}, never raw URL
+  - Watermark is server-side — clients render image as-is
+  - Consider Universal Links (iOS) / App Links (Android) so /o/{id}
+    URLs open in-app for existing users (see §13.6)
 ```
 
 Done — this is everything a native client needs.
