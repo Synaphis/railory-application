@@ -20,6 +20,7 @@ import {
   ANGLE_DESCRIPTIONS,
   type Garment,
 } from "../_shared/try-on.ts";
+import { applyWatermark } from "../_shared/watermark.ts";
 
 /**
  * POST /try-on
@@ -151,47 +152,68 @@ Deno.serve(async (req: Request) => {
 
     let outputUrl = result.url;
 
+    // Decode the AI result + apply the Railory watermark. The watermarked
+    // bytes are used for both the bucket upload (preview / persisted try-ons)
+    // and the base64 data URL returned to standard-mode callers.
+    //
+    // applyWatermark fails open — if anything goes wrong (network, decode
+    // error), it returns the original bytes so a watermark glitch can never
+    // break a try-on.
+    let watermarkedBytes: Uint8Array | null = null;
+    let mimeType = "image/png";
+    const match = result.url.match(/^data:([^;]+);base64,(.+)$/);
+    if (match) {
+      mimeType = match[1];
+      const binaryStr = atob(match[2]);
+      const originalBytes = new Uint8Array(binaryStr.length);
+      for (let i = 0; i < binaryStr.length; i++) {
+        originalBytes[i] = binaryStr.charCodeAt(i);
+      }
+
+      watermarkedBytes = await applyWatermark(originalBytes);
+
+      // Re-encode as data URL for callers that don't persist (no outfit_id)
+      let binary = "";
+      for (let i = 0; i < watermarkedBytes.length; i++) {
+        binary += String.fromCharCode(watermarkedBytes[i]);
+      }
+      outputUrl = `data:${mimeType};base64,${btoa(binary)}`;
+    }
+
     // Persist to storage whenever we have an outfit_id (previews + user try-ons)
-    if (outfit_id) {
+    if (outfit_id && watermarkedBytes) {
       try {
-        const match = result.url.match(/^data:([^;]+);base64,(.+)$/);
-        if (match) {
-          const mime = match[1];
-          const ext = mime.includes("png") ? "png" : "jpg";
-          const binaryStr = atob(match[2]);
-          const bytes = new Uint8Array(binaryStr.length);
-          for (let i = 0; i < binaryStr.length; i++) {
-            bytes[i] = binaryStr.charCodeAt(i);
-          }
+        const ext = mimeType.includes("png") ? "png" : "jpg";
+        const suffix = angle
+          ? angle
+          : isPreview
+            ? "preview"
+            : Date.now().toString();
+        const filePath = `${user.id}/${outfit_id}/${suffix}.${ext}`;
 
-          // For angle shots use angle as suffix, otherwise use timestamp
-          const suffix = angle ? angle : (isPreview ? "preview" : Date.now().toString());
-          const filePath = `${user.id}/${outfit_id}/${suffix}.${ext}`;
+        const { error: uploadErr } = await db.storage
+          .from("outfit-previews")
+          .upload(filePath, watermarkedBytes.buffer, {
+            contentType: mimeType,
+            upsert: true,
+          });
 
-          const { error: uploadErr } = await db.storage
+        if (!uploadErr) {
+          const { data: publicUrlData } = db.storage
             .from("outfit-previews")
-            .upload(filePath, bytes.buffer, {
-              contentType: mime,
-              upsert: true,
-            });
+            .getPublicUrl(filePath);
 
-          if (!uploadErr) {
-            const { data: publicUrlData } = db.storage
-              .from("outfit-previews")
-              .getPublicUrl(filePath);
+          if (publicUrlData?.publicUrl) {
+            outputUrl = publicUrlData.publicUrl;
 
-            if (publicUrlData?.publicUrl) {
-              outputUrl = publicUrlData.publicUrl;
-
-              // Update preview_image on the outfit row (latest try-on)
-              await db
-                .from("outfits")
-                .update({ preview_image: outputUrl })
-                .eq("id", outfit_id);
-            }
-          } else {
-            console.error("[try-on] Upload error:", uploadErr);
+            // Update preview_image on the outfit row (latest try-on)
+            await db
+              .from("outfits")
+              .update({ preview_image: outputUrl })
+              .eq("id", outfit_id);
           }
+        } else {
+          console.error("[try-on] Upload error:", uploadErr);
         }
       } catch (err) {
         console.error("[try-on] Persist error:", err);
