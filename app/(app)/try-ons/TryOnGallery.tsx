@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { formatDate } from "@/lib/utils";
+import { formatDate, MARKETING_URL } from "@/lib/utils";
 
 export interface GalleryItem {
   outfitId: string;
@@ -53,10 +53,16 @@ function Lightbox({
   const current = images[idx];
 
   async function handleShare() {
+    // Share a marketing-page URL (railory.io/o/{outfit_id}) instead of the
+    // raw image URL. Recipients land on a branded page with a CTA back
+    // to Railory, not a dead-end image file.
+    const shareUrl = `${MARKETING_URL}/o/${outfitId}`;
     const shareData = {
       title: "My Railory Try-On",
-      text: prompt ? `Styled with Railory: "${prompt}"` : "Check out my virtual try-on from Railory",
-      url: current,
+      text: prompt
+        ? `Styled with Railory — "${prompt}"`
+        : "Check out my virtual try-on from Railory",
+      url: shareUrl,
     };
 
     if (navigator.share) {
@@ -66,7 +72,7 @@ function Lightbox({
         // User cancelled or error
       }
     } else {
-      await navigator.clipboard.writeText(current);
+      await navigator.clipboard.writeText(shareUrl);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }
