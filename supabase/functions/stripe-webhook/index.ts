@@ -155,19 +155,25 @@ async function handleCheckoutCompleted(
 
   const { start, end } = getPeriodDates(stripeSubscription);
 
+  // Upsert (not update) so this is self-healing if the row was deleted
+  // — without this, deleting the subscriptions row leaves the webhook
+  // silently no-op'ing on every subsequent event.
   const { error } = await db
     .from("subscriptions")
-    .update({
-      plan: planInfo?.plan ?? "starter",
-      billing_interval: planInfo?.interval ?? "monthly",
-      status: "active",
-      stripe_customer_id: customerId,
-      stripe_subscription_id: subscriptionId,
-      current_period_start: start,
-      current_period_end: end,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("user_id", resolvedUserId);
+    .upsert(
+      {
+        user_id: resolvedUserId,
+        plan: planInfo?.plan ?? "starter",
+        billing_interval: planInfo?.interval ?? "monthly",
+        status: "active",
+        stripe_customer_id: customerId,
+        stripe_subscription_id: subscriptionId,
+        current_period_start: start,
+        current_period_end: end,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "user_id" }
+    );
 
   if (error) {
     console.error("[stripe-webhook] Failed to update subscription:", error);
