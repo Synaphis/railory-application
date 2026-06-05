@@ -118,9 +118,13 @@ export default function TopBar({ userEmail }: { userEmail: string }) {
         </button>
       </header>
 
-      {/* ── Mobile drawer ── */}
+      {/* ── Mobile drawer ──
+            z-40 so it sits above any in-page UI (saved-grid unsave button
+            is z-30, OutfitCard overlays are z-10..20). The header above
+            remains z-30 — they don't visually overlap because drawer
+            starts at top:48 (below the 48px header). */}
       {mobileOpen && (
-        <div className="md:hidden fixed inset-0 z-20" style={{ top: 48 }}>
+        <div className="md:hidden fixed inset-0 z-40" style={{ top: 48 }}>
           {/* Backdrop */}
           <button
             onClick={() => setMobileOpen(false)}
