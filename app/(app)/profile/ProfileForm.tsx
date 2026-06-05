@@ -167,7 +167,7 @@ export default function ProfileForm({
 
   return (
     <div>
-      <div className="px-8 py-6 max-w-3xl">
+      <div className="px-4 sm:px-6 md:px-8 py-6 max-w-3xl">
         <h1 className="font-display text-card-heading font-medium text-near-black mb-1">
           Profile
         </h1>
@@ -221,7 +221,7 @@ export default function ProfileForm({
             Try-On Avatar
           </h2>
 
-          <div className="flex gap-6 items-start">
+          <div className="flex flex-col sm:flex-row gap-5 sm:gap-6 items-start">
             {/* Preview */}
             <div className="w-36 flex-shrink-0">
               {avatarUrl ? (
@@ -307,7 +307,7 @@ export default function ProfileForm({
             avatar. Your uploaded photo is always the primary reference.
           </p>
 
-          <div className="grid grid-cols-2 gap-x-6 gap-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-4">
             {/* Height */}
             <div>
               <label className="text-xs font-mono text-muted-slate uppercase tracking-wider block mb-1.5">
@@ -420,7 +420,7 @@ export default function ProfileForm({
             Used to show prices in your currency and filter products that ship to you.
           </p>
 
-          <div className="grid grid-cols-2 gap-x-6 gap-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-4">
             {/* Country */}
             <div>
               <label className="text-xs font-mono text-muted-slate uppercase tracking-wider block mb-1.5">

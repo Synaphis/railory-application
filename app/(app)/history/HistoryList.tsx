@@ -119,7 +119,7 @@ export default function HistoryList({ sessions }: { sessions: SessionWithCount[]
 
   return (
     <div>
-      <div className="px-8 pt-6 pb-16">
+      <div className="px-4 sm:px-6 md:px-8 pt-6 pb-16">
         <h1 className="font-display text-card-heading font-medium text-near-black mb-6">
           History
         </h1>
